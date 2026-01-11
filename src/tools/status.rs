@@ -163,13 +163,26 @@ log_meal(date, "dinner", recipe_id: 5, servings: 1, percent_eaten: 75)
 update_meal_entry(id: 12, servings: 2)  // ate more than initially logged
 ```
 
+## Updating Food Items
+
+Food items can be updated at any time, even when used in recipes:
+```
+update_food_item(id: 5, calories: 170, protein: 32)
+```
+
+When you update a food item:
+- All recipes using that item automatically have their nutrition recalculated
+- The response includes `recipes_updated` showing which recipe IDs were affected
+- This is useful for correcting nutritional data you entered incorrectly
+
 ## Notes
 
 - Dates use ISO format: YYYY-MM-DD
 - Days are created automatically when you log the first meal
-- Recipe nutrition is cached and updates when ingredients change
+- Recipe nutrition is cached and updates automatically when:
+  - Ingredients are added/removed/updated
+  - A food item used in the recipe is updated
 - Daily nutrition totals are cached and update when meals change
-- Food items used in recipes cannot be modified (preserves historical accuracy)
 - Recipes logged in meals cannot be modified (preserves historical accuracy)
 "#;
 

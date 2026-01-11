@@ -381,7 +381,7 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Update a food item (only allowed if not used in any recipes)")]
+    #[tool(description = "Update a food item. Automatically recalculates nutrition for any recipes using this item.")]
     fn update_food_item(&self, Parameters(p): Parameters<UpdateFoodItemParams>) -> Result<CallToolResult, McpError> {
         let data = FoodItemUpdate {
             name: p.name, brand: p.brand, serving_size: p.serving_size, serving_unit: p.serving_unit,
@@ -390,10 +390,7 @@ impl UhmService {
             cholesterol: p.cholesterol, preference: p.preference.map(|s| Preference::from_str(&s)), notes: p.notes,
         };
         let result = food_items::update_food_item(&self.database, p.id, data).map_err(|e| McpError::internal_error(e, None))?;
-        let json = match result {
-            Ok(success) => serde_json::to_string_pretty(&success),
-            Err(blocked) => serde_json::to_string_pretty(&blocked),
-        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 

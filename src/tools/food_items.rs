@@ -110,18 +110,12 @@ pub struct ListFoodItemsResponse {
     pub offset: i64,
 }
 
-/// Response for update_food_item when blocked
+/// Response for update_food_item
 #[derive(Debug, Serialize)]
-pub struct UpdateBlockedResponse {
-    pub error: String,
-    pub used_in: Vec<String>,
-}
-
-/// Response for successful update
-#[derive(Debug, Serialize)]
-pub struct UpdateSuccessResponse {
+pub struct UpdateFoodItemResponse {
     pub success: bool,
     pub updated_at: String,
+    pub recipes_updated: Vec<i64>,  // Recipe IDs that had nutrition recalculated
 }
 
 /// Add a new food item
@@ -236,39 +230,38 @@ pub fn list_food_items(
     })
 }
 
-/// Update a food item (blocked if used in recipes)
+/// Update a food item (automatically recalculates nutrition for recipes using this item)
 pub fn update_food_item(
     db: &Database,
     id: i64,
     data: FoodItemUpdate,
-) -> Result<Result<UpdateSuccessResponse, UpdateBlockedResponse>, String> {
+) -> Result<UpdateFoodItemResponse, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
-    // Check usage first
-    let usage_count = FoodItem::get_usage_count(&conn, id)
-        .map_err(|e| format!("Failed to check usage: {}", e))?;
-
-    if usage_count > 0 {
-        let used_in = FoodItem::get_used_in_recipes(&conn, id)
-            .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
-
-        return Ok(Err(UpdateBlockedResponse {
-            error: format!("Cannot update food item: currently used in {} recipes", usage_count),
-            used_in,
-        }));
-    }
+    // Get recipes using this food item (for recalculation after update)
+    let recipe_ids = FoodItem::get_recipe_ids_using_item(&conn, id)
+        .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
 
     let updated = FoodItem::update(&conn, id, &data)
         .map_err(|e| format!("Failed to update food item: {}", e))?;
 
     match updated {
-        Some(item) => Ok(Ok(UpdateSuccessResponse {
-            success: true,
-            updated_at: item.updated_at,
-        })),
-        None => Ok(Err(UpdateBlockedResponse {
-            error: "Food item not found or update blocked".to_string(),
-            used_in: vec![],
-        })),
+        Some(item) => {
+            // Recalculate nutrition for all recipes using this food item
+            let mut recipes_updated = Vec::new();
+            for recipe_id in &recipe_ids {
+                use crate::models::recalculate_recipe_nutrition;
+                recalculate_recipe_nutrition(&conn, *recipe_id)
+                    .map_err(|e| format!("Failed to recalculate recipe {}: {}", recipe_id, e))?;
+                recipes_updated.push(*recipe_id);
+            }
+
+            Ok(UpdateFoodItemResponse {
+                success: true,
+                updated_at: item.updated_at,
+                recipes_updated,
+            })
+        }
+        None => Err(format!("Food item not found with id: {}", id)),
     }
 }

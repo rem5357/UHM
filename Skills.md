@@ -28,7 +28,7 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `search_food_items` - Search by name or brand
 - `get_food_item` - Get detailed food item info with recipe usage count
 - `list_food_items` - List with filtering, sorting, pagination
-- `update_food_item` - Update (blocked if used in recipes to preserve data integrity)
+- `update_food_item` - Update food item (auto-recalculates nutrition for recipes using it)
 
 ### Phase 4: Recipe Tools
 - `create_recipe` - Create recipes (ingredients added separately)
@@ -50,6 +50,9 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `update_meal_entry` - Update servings, percent eaten, etc.
 - `delete_meal_entry` - Remove meal entries
 - `recalculate_day_nutrition` - Force daily totals recalculation
+
+### Phase 6: AI Assistant Support
+- `meal_instructions` - Returns step-by-step guide for logging meals (for AI assistants to reference)
 
 ## Technology Stack
 

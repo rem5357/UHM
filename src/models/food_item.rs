@@ -233,20 +233,8 @@ impl FoodItem {
         Ok(items)
     }
 
-    /// Update a food item (only if not used in any recipes)
+    /// Update a food item
     pub fn update(conn: &Connection, id: i64, data: &FoodItemUpdate) -> DbResult<Option<Self>> {
-        // Check if used in recipes
-        let usage_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM recipe_ingredients WHERE food_item_id = ?1",
-            [id],
-            |row| row.get(0),
-        )?;
-
-        if usage_count > 0 {
-            // Return None to indicate update blocked
-            return Ok(None);
-        }
-
         // Build dynamic UPDATE query
         let mut updates = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -327,6 +315,19 @@ impl FoodItem {
             .collect::<Result<Vec<String>, _>>()?;
 
         Ok(names)
+    }
+
+    /// Get recipe IDs that use this food item (for recalculation)
+    pub fn get_recipe_ids_using_item(conn: &Connection, id: i64) -> DbResult<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT recipe_id FROM recipe_ingredients WHERE food_item_id = ?1"
+        )?;
+
+        let ids = stmt
+            .query_map([id], |row| row.get(0))?
+            .collect::<Result<Vec<i64>, _>>()?;
+
+        Ok(ids)
     }
 
     /// Count total food items (optionally filtered by preference)
