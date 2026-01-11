@@ -47,6 +47,22 @@ pub struct RecipeSummary {
     pub ingredient_count: usize,
 }
 
+/// Unused recipe summary (safe to delete)
+#[derive(Debug, Serialize)]
+pub struct UnusedRecipeSummary {
+    pub id: i64,
+    pub name: String,
+    pub is_favorite: bool,
+    pub created_at: String,
+}
+
+/// Response for list_unused_recipes
+#[derive(Debug, Serialize)]
+pub struct ListUnusedRecipesResponse {
+    pub recipes: Vec<UnusedRecipeSummary>,
+    pub count: usize,
+}
+
 /// Response for list_recipes
 #[derive(Debug, Serialize)]
 pub struct ListRecipesResponse {
@@ -289,6 +305,46 @@ pub fn delete_recipe(
         success: true,
         deleted_id: id,
     }))
+}
+
+/// List recipes with zero uses (not logged in meals, not used as component in other recipes)
+/// These recipes are safe to delete
+pub fn list_unused_recipes(db: &Database) -> Result<ListUnusedRecipesResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Find recipes that:
+    // 1. Have no meal_entries referencing them
+    // 2. Are not used as a component in any other recipe
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT r.id, r.name, r.is_favorite, r.created_at
+        FROM recipes r
+        WHERE NOT EXISTS (
+            SELECT 1 FROM meal_entries me WHERE me.recipe_id = r.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM recipe_components rc WHERE rc.component_recipe_id = r.id
+        )
+        ORDER BY r.name ASC
+        "#
+    ).map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let recipes: Vec<UnusedRecipeSummary> = stmt
+        .query_map([], |row| {
+            Ok(UnusedRecipeSummary {
+                id: row.get("id")?,
+                name: row.get("name")?,
+                is_favorite: row.get::<_, i32>("is_favorite")? != 0,
+                created_at: row.get("created_at")?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect results: {}", e))?;
+
+    let count = recipes.len();
+
+    Ok(ListUnusedRecipesResponse { recipes, count })
 }
 
 // ============================================================================

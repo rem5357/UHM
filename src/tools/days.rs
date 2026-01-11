@@ -92,6 +92,21 @@ pub struct RecalculateDayNutritionResponse {
     pub nutrition: Nutrition,
 }
 
+/// Orphaned day summary (day with no meals)
+#[derive(Debug, Serialize)]
+pub struct OrphanedDaySummary {
+    pub id: i64,
+    pub date: String,
+    pub notes: Option<String>,
+}
+
+/// Response for list_orphaned_days
+#[derive(Debug, Serialize)]
+pub struct ListOrphanedDaysResponse {
+    pub days: Vec<OrphanedDaySummary>,
+    pub count: usize,
+}
+
 // ============================================================================
 // Day Tools
 // ============================================================================
@@ -395,4 +410,37 @@ pub fn recalculate_day_nutrition_tool(db: &Database, date: &str) -> Result<Recal
         date: day.date,
         nutrition,
     })
+}
+
+/// List days with no meal entries (orphaned days safe to delete)
+pub fn list_orphaned_days(db: &Database) -> Result<ListOrphanedDaysResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Find days that have no meal_entries
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT d.id, d.date, d.notes
+        FROM days d
+        WHERE NOT EXISTS (
+            SELECT 1 FROM meal_entries me WHERE me.day_id = d.id
+        )
+        ORDER BY d.date DESC
+        "#
+    ).map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let days: Vec<OrphanedDaySummary> = stmt
+        .query_map([], |row| {
+            Ok(OrphanedDaySummary {
+                id: row.get("id")?,
+                date: row.get("date")?,
+                notes: row.get("notes")?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect results: {}", e))?;
+
+    let count = days.len();
+
+    Ok(ListOrphanedDaysResponse { days, count })
 }

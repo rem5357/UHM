@@ -627,6 +627,22 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // --- Cleanup/Maintenance ---
+
+    #[tool(description = "List all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete.")]
+    fn list_unused_recipes(&self) -> Result<CallToolResult, McpError> {
+        let result = recipes::list_unused_recipes(&self.database).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List all days with no meal entries (orphaned days). These are safe to delete.")]
+    fn list_orphaned_days(&self) -> Result<CallToolResult, McpError> {
+        let result = days::list_orphaned_days(&self.database).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ============================================================================
@@ -651,9 +667,11 @@ impl ServerHandler for UhmService {
                  IMPORTANT: Call meal_instructions first when starting a food logging session \
                  to get step-by-step guidance on using the tools. \
                  Tools: uhm_status, meal_instructions, add/search/get/list/update_food_item, \
-                 create/get/list/update_recipe, add/update/remove_recipe_ingredient, \
-                 recalculate_recipe_nutrition, get_or_create_day/get_day/list_days/update_day, \
-                 log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition."
+                 create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
+                 add/update/remove_recipe_component, recalculate_recipe_nutrition, \
+                 get_or_create_day/get_day/list_days/update_day, \
+                 log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition, \
+                 list_unused_recipes, list_orphaned_days."
                     .into(),
             ),
         }

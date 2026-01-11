@@ -64,6 +64,11 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - Nutrition automatically cascades through component hierarchy
 - `get_recipe` now returns both ingredients and components with full details
 
+### Phase 8: Cleanup/Maintenance Tools
+- `list_unused_recipes` - Find all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete.
+- `list_orphaned_days` - Find all days with no meal entries. These are safe to delete.
+- Efficient SQL queries to quickly identify cleanup candidates
+
 ## Technology Stack
 
 ### Rust
