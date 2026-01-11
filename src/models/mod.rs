@@ -7,6 +7,7 @@ mod food_item;
 mod meal_entry;
 mod nutrition;
 mod recipe;
+mod recipe_component;
 mod recipe_ingredient;
 
 pub use day::{Day, DayCreate, DayUpdate};
@@ -17,6 +18,10 @@ pub use meal_entry::{
 };
 pub use nutrition::Nutrition;
 pub use recipe::{Recipe, RecipeCreate, RecipeUpdate};
+pub use recipe_component::{
+    RecipeComponent, RecipeComponentCreate, RecipeComponentDetail, RecipeComponentUpdate,
+    would_create_cycle,
+};
 pub use recipe_ingredient::{
     RecipeIngredient, RecipeIngredientCreate, RecipeIngredientDetail,
     RecipeIngredientUpdate, recalculate_recipe_nutrition,

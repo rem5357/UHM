@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -33,6 +33,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 1 {
         migrate_v1(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (1)", [])?;
+    }
+
+    if current_version < 2 {
+        migrate_v2(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
     }
 
     Ok(())
@@ -222,6 +227,38 @@ fn migrate_v1(conn: &Connection) -> DbResult<()> {
 
         CREATE INDEX idx_vitals_type ON vitals(vital_type);
         CREATE INDEX idx_vitals_timestamp ON vitals(timestamp);
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v2: Recipe components (recipes using other recipes)
+fn migrate_v2(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- RECIPE COMPONENTS
+        -- Allows recipes to use other recipes as ingredients
+        -- ============================================
+        CREATE TABLE recipe_components (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE CASCADE,
+            component_recipe_id INTEGER NOT NULL REFERENCES recipes(id) ON DELETE RESTRICT,
+            servings REAL NOT NULL DEFAULT 1.0,  -- how many servings of component recipe
+
+            -- Metadata
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+
+            -- Constraints
+            UNIQUE(recipe_id, component_recipe_id),
+            CHECK(recipe_id != component_recipe_id)  -- can't use itself as component
+        );
+
+        CREATE INDEX idx_recipe_components_recipe ON recipe_components(recipe_id);
+        CREATE INDEX idx_recipe_components_component ON recipe_components(component_recipe_id);
         "#,
     )?;
 

@@ -88,6 +88,28 @@ add_recipe_ingredient(
 - Nutrition is automatically calculated and cached
 - Each food item can only be added once per recipe (use update to change quantity)
 
+### Step 4b: Add Component Recipes (optional)
+
+Recipes can use other recipes as components (sub-recipes):
+```
+add_recipe_component(
+  recipe_id: 1,          // parent recipe
+  component_recipe_id: 5, // the sub-recipe to include
+  servings: 2            // how many servings of the component to use
+)
+```
+
+**Example use case:** A "Burrito Bowl" recipe might include:
+- "Cilantro Lime Rice" recipe (2 servings)
+- "Black Beans" recipe (1 serving)
+- Plus individual food items like chicken, salsa, cheese
+
+**Important:**
+- Circular references are automatically prevented (A cannot use B if B uses A)
+- Component nutrition is automatically included in parent recipe calculation
+- Use `update_recipe_component` to change servings
+- Use `remove_recipe_component` to remove a component
+
 **Unit handling:**
 - Use `unit: "serving"` when quantity represents number of servings (most common)
   - e.g., `quantity: 1.0, unit: "serving"` = 1 serving of the food item
@@ -139,6 +161,7 @@ This returns all meals organized by type (breakfast/lunch/dinner/snack) with nut
 | View food item details | `get_food_item` |
 | Create recipe | `create_recipe` |
 | Add ingredient to recipe | `add_recipe_ingredient` |
+| Add sub-recipe to recipe | `add_recipe_component` |
 | View recipe with nutrition | `get_recipe` |
 | Log meal to day | `log_meal` |
 | View day's meals | `get_day` |
@@ -159,6 +182,14 @@ This returns all meals organized by type (breakfast/lunch/dinner/snack) with nut
 3. `add_recipe_ingredient(...)` - Add each ingredient
 4. `get_recipe(id)` - Verify nutrition looks correct
 5. `log_meal(date, meal_type, recipe_id, servings)` - Log it
+
+### Using recipe components (sub-recipes)
+Example: Creating a "Burrito Bowl" that uses a "Rice" sub-recipe:
+1. Create the rice recipe first with its ingredients
+2. Create the burrito bowl recipe
+3. `add_recipe_component(recipe_id: burrito_bowl_id, component_recipe_id: rice_id, servings: 1)`
+4. Add other ingredients directly to the burrito bowl
+5. `get_recipe(burrito_bowl_id)` - Will show both ingredients and components with combined nutrition
 
 ### Partial consumption
 Use `percent_eaten` when you didn't finish:

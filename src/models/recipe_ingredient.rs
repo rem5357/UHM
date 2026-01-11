@@ -200,15 +200,15 @@ impl RecipeIngredient {
     }
 }
 
-/// Calculate total nutrition for a recipe based on its ingredients
+/// Calculate total nutrition for a recipe based on its ingredients and component recipes
 pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult<Nutrition> {
     let recipe = Recipe::get_by_id(conn, recipe_id)?
         .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
-    let ingredients = RecipeIngredient::get_for_recipe(conn, recipe_id)?;
-
     let mut total = Nutrition::zero();
 
+    // Sum nutrition from food item ingredients
+    let ingredients = RecipeIngredient::get_for_recipe(conn, recipe_id)?;
     for ingredient in ingredients {
         let food_item = FoodItem::get_by_id(conn, ingredient.food_item_id)?
             .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
@@ -222,6 +222,18 @@ pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult
         );
 
         total = total + food_item.nutrition.scale(multiplier);
+    }
+
+    // Sum nutrition from component recipes
+    use super::recipe_component::RecipeComponent;
+    let components = RecipeComponent::get_for_recipe(conn, recipe_id)?;
+    for component in components {
+        // Get the component recipe's cached nutrition (per serving)
+        let component_recipe = Recipe::get_by_id(conn, component.component_recipe_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        // Scale by number of servings used
+        total = total + component_recipe.cached_nutrition.scale(component.servings);
     }
 
     // Divide by servings to get per-serving nutrition

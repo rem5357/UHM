@@ -54,6 +54,15 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 ### Phase 6: AI Assistant Support
 - `meal_instructions` - Returns step-by-step guide for logging meals (for AI assistants to reference)
 
+### Phase 7: Recipe Components
+- Recipes can now use other recipes as components (sub-recipes)
+- `add_recipe_component` - Add a recipe as a component of another recipe
+- `update_recipe_component` - Update component servings
+- `remove_recipe_component` - Remove a component from a recipe
+- Circular reference detection prevents infinite loops (A uses B uses A)
+- Nutrition automatically cascades through component hierarchy
+- `get_recipe` now returns both ingredients and components with full details
+
 ## Technology Stack
 
 ### Rust
@@ -140,6 +149,7 @@ D:\Projects\UHM\
 │   │   ├── food_item.rs    # FoodItem CRUD
 │   │   ├── recipe.rs       # Recipe CRUD
 │   │   ├── recipe_ingredient.rs  # Recipe ingredients + nutrition calc
+│   │   ├── recipe_component.rs   # Recipe components (sub-recipes)
 │   │   ├── day.rs          # Day CRUD
 │   │   └── meal_entry.rs   # MealEntry CRUD + day nutrition calc
 │   ├── tools/

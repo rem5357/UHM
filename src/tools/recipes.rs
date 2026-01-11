@@ -1,6 +1,6 @@
 //! Recipe MCP Tools
 //!
-//! Tools for managing recipes and recipe ingredients.
+//! Tools for managing recipes, recipe ingredients, and recipe components.
 
 use serde::Serialize;
 
@@ -8,7 +8,8 @@ use crate::db::Database;
 use crate::models::{
     Nutrition, Recipe, RecipeCreate, RecipeIngredient, RecipeIngredientCreate,
     RecipeIngredientDetail, RecipeIngredientUpdate, RecipeUpdate,
-    recalculate_recipe_nutrition,
+    RecipeComponent, RecipeComponentCreate, RecipeComponentDetail, RecipeComponentUpdate,
+    recalculate_recipe_nutrition, would_create_cycle,
 };
 
 /// Response for create_recipe
@@ -19,7 +20,7 @@ pub struct CreateRecipeResponse {
     pub created_at: String,
 }
 
-/// Full recipe detail with ingredients
+/// Full recipe detail with ingredients and components
 #[derive(Debug, Serialize)]
 pub struct RecipeDetail {
     pub id: i64,
@@ -27,6 +28,7 @@ pub struct RecipeDetail {
     pub servings_produced: f64,
     pub is_favorite: bool,
     pub ingredients: Vec<RecipeIngredientDetail>,
+    pub components: Vec<RecipeComponentDetail>,
     pub nutrition_per_serving: Nutrition,
     pub notes: Option<String>,
     pub created_at: String,
@@ -126,6 +128,9 @@ pub fn get_recipe(db: &Database, id: i64) -> Result<Option<RecipeDetail>, String
             let ingredients = RecipeIngredient::get_details_for_recipe(&conn, id)
                 .map_err(|e| format!("Failed to get ingredients: {}", e))?;
 
+            let components = RecipeComponent::get_details_for_recipe(&conn, id)
+                .map_err(|e| format!("Failed to get components: {}", e))?;
+
             let times_logged = Recipe::get_times_logged(&conn, id)
                 .map_err(|e| format!("Failed to get times logged: {}", e))?;
 
@@ -135,6 +140,7 @@ pub fn get_recipe(db: &Database, id: i64) -> Result<Option<RecipeDetail>, String
                 servings_produced: recipe.servings_produced,
                 is_favorite: recipe.is_favorite,
                 ingredients,
+                components,
                 nutrition_per_serving: recipe.cached_nutrition,
                 notes: recipe.notes,
                 created_at: recipe.created_at,
@@ -332,4 +338,122 @@ pub fn recalculate_nutrition(db: &Database, recipe_id: i64) -> Result<Recalculat
         recipe_id,
         nutrition_per_serving: nutrition,
     })
+}
+
+// ============================================================================
+// Recipe Component Tools
+// ============================================================================
+
+/// Response for add_recipe_component
+#[derive(Debug, Serialize)]
+pub struct AddComponentResponse {
+    pub id: i64,
+    pub recipe_id: i64,
+    pub component_recipe_id: i64,
+    pub component_recipe_name: String,
+    pub servings: f64,
+}
+
+/// Add a recipe as a component of another recipe
+pub fn add_recipe_component(
+    db: &Database,
+    data: RecipeComponentCreate,
+) -> Result<AddComponentResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Validate parent recipe exists
+    let parent_recipe = Recipe::get_by_id(&conn, data.recipe_id)
+        .map_err(|e| format!("Database error checking recipe: {}", e))?;
+    if parent_recipe.is_none() {
+        return Err(format!("Recipe not found with id: {}", data.recipe_id));
+    }
+
+    // Validate component recipe exists
+    let component_recipe = Recipe::get_by_id(&conn, data.component_recipe_id)
+        .map_err(|e| format!("Database error checking component recipe: {}", e))?;
+    let component_recipe = match component_recipe {
+        Some(r) => r,
+        None => return Err(format!("Component recipe not found with id: {}", data.component_recipe_id)),
+    };
+
+    // Check for circular reference
+    if would_create_cycle(&conn, data.recipe_id, data.component_recipe_id)
+        .map_err(|e| format!("Failed to check for circular reference: {}", e))?
+    {
+        return Err(format!(
+            "Cannot add component: would create circular reference (recipe {} already uses recipe {} directly or indirectly)",
+            data.component_recipe_id, data.recipe_id
+        ));
+    }
+
+    // Check if component already exists
+    let existing = RecipeComponent::get_for_recipe(&conn, data.recipe_id)
+        .map_err(|e| format!("Database error checking existing components: {}", e))?;
+    if existing.iter().any(|c| c.component_recipe_id == data.component_recipe_id) {
+        return Err(format!(
+            "Recipe {} is already a component of recipe {}. Use update_recipe_component to modify servings.",
+            data.component_recipe_id, data.recipe_id
+        ));
+    }
+
+    let component = RecipeComponent::create(&conn, &data)
+        .map_err(|e| format!("Failed to add component: {}", e))?;
+
+    // Recalculate nutrition
+    recalculate_recipe_nutrition(&conn, data.recipe_id)
+        .map_err(|e| format!("Failed to recalculate nutrition: {}", e))?;
+
+    Ok(AddComponentResponse {
+        id: component.id,
+        recipe_id: component.recipe_id,
+        component_recipe_id: component.component_recipe_id,
+        component_recipe_name: component_recipe.name,
+        servings: component.servings,
+    })
+}
+
+/// Update a recipe component's servings
+pub fn update_recipe_component(
+    db: &Database,
+    id: i64,
+    data: RecipeComponentUpdate,
+) -> Result<Option<RecipeComponent>, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Get recipe_id before update for recalculation
+    let recipe_id = RecipeComponent::get_recipe_id(&conn, id)
+        .map_err(|e| format!("Failed to get recipe: {}", e))?;
+
+    let updated = RecipeComponent::update(&conn, id, &data)
+        .map_err(|e| format!("Failed to update component: {}", e))?;
+
+    // Recalculate nutrition if update succeeded
+    if let (Some(_), Some(recipe_id)) = (&updated, recipe_id) {
+        recalculate_recipe_nutrition(&conn, recipe_id)
+            .map_err(|e| format!("Failed to recalculate nutrition: {}", e))?;
+    }
+
+    Ok(updated)
+}
+
+/// Remove a component from a recipe
+pub fn remove_recipe_component(db: &Database, id: i64) -> Result<bool, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Get recipe_id before delete for recalculation
+    let recipe_id = RecipeComponent::get_recipe_id(&conn, id)
+        .map_err(|e| format!("Failed to get recipe: {}", e))?;
+
+    let deleted = RecipeComponent::delete(&conn, id)
+        .map_err(|e| format!("Failed to remove component: {}", e))?;
+
+    // Recalculate nutrition if delete succeeded
+    if deleted {
+        if let Some(recipe_id) = recipe_id {
+            recalculate_recipe_nutrition(&conn, recipe_id)
+                .map_err(|e| format!("Failed to recalculate nutrition: {}", e))?;
+        }
+    }
+
+    Ok(deleted)
 }

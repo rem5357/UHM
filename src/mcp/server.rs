@@ -18,6 +18,7 @@ use crate::db::Database;
 use crate::models::{
     FoodItemCreate, FoodItemUpdate, Preference,
     RecipeCreate, RecipeUpdate, RecipeIngredientCreate, RecipeIngredientUpdate,
+    RecipeComponentCreate, RecipeComponentUpdate,
 };
 use crate::tools::days;
 use crate::tools::food_items;
@@ -219,6 +220,39 @@ pub struct RemoveRecipeIngredientParams {
 pub struct RecalculateNutritionParams {
     /// Recipe ID to recalculate
     pub recipe_id: i64,
+}
+
+// ============================================================================
+// Recipe Component Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddRecipeComponentParams {
+    /// Parent recipe ID (the recipe to add the component to)
+    pub recipe_id: i64,
+    /// Component recipe ID (the recipe to use as an ingredient)
+    pub component_recipe_id: i64,
+    /// Number of servings of the component recipe to use (default 1.0)
+    #[serde(default = "default_servings")]
+    pub servings: f64,
+    /// Optional notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateRecipeComponentParams {
+    /// Recipe component ID to update
+    pub id: i64,
+    /// New servings (optional)
+    pub servings: Option<f64>,
+    /// New notes (optional)
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RemoveRecipeComponentParams {
+    /// Recipe component ID to remove
+    pub id: i64,
 }
 
 // ============================================================================
@@ -465,6 +499,34 @@ impl UhmService {
     fn recalculate_recipe_nutrition(&self, Parameters(p): Parameters<RecalculateNutritionParams>) -> Result<CallToolResult, McpError> {
         let result = recipes::recalculate_nutrition(&self.database, p.recipe_id).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // --- Recipe Components ---
+
+    #[tool(description = "Add another recipe as a component of a recipe (recipe within a recipe). Automatically calculates combined nutrition.")]
+    fn add_recipe_component(&self, Parameters(p): Parameters<AddRecipeComponentParams>) -> Result<CallToolResult, McpError> {
+        let data = RecipeComponentCreate { recipe_id: p.recipe_id, component_recipe_id: p.component_recipe_id, servings: p.servings, notes: p.notes };
+        let result = recipes::add_recipe_component(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update a recipe component's servings")]
+    fn update_recipe_component(&self, Parameters(p): Parameters<UpdateRecipeComponentParams>) -> Result<CallToolResult, McpError> {
+        let data = RecipeComponentUpdate { servings: p.servings, notes: p.notes };
+        let result = recipes::update_recipe_component(&self.database, p.id, data).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(comp) => serde_json::to_string_pretty(&comp),
+            None => Ok(format!(r#"{{"error": "Recipe component not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Remove a component recipe from a recipe")]
+    fn remove_recipe_component(&self, Parameters(p): Parameters<RemoveRecipeComponentParams>) -> Result<CallToolResult, McpError> {
+        let deleted = recipes::remove_recipe_component(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::json!({"success": deleted, "id": p.id}).to_string();
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
