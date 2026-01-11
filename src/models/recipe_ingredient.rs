@@ -213,9 +213,13 @@ pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult
         let food_item = FoodItem::get_by_id(conn, ingredient.food_item_id)?
             .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
-        // Calculate multiplier based on quantity and serving size
-        // This assumes same unit type (simplified for now)
-        let multiplier = ingredient.quantity / food_item.serving_size;
+        // Calculate multiplier based on ingredient unit type
+        let multiplier = calculate_multiplier(
+            ingredient.quantity,
+            &ingredient.unit,
+            food_item.serving_size,
+            &food_item.serving_unit,
+        );
 
         total = total + food_item.nutrition.scale(multiplier);
     }
@@ -224,6 +228,31 @@ pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult
     let per_serving = total.scale(1.0 / recipe.servings_produced);
 
     Ok(per_serving)
+}
+
+/// Calculate the nutrition multiplier based on ingredient quantity and units
+fn calculate_multiplier(
+    quantity: f64,
+    ingredient_unit: &str,
+    serving_size: f64,
+    serving_unit: &str,
+) -> f64 {
+    let unit_lower = ingredient_unit.to_lowercase();
+
+    // If ingredient is specified in "servings", quantity IS the multiplier
+    if unit_lower == "serving" || unit_lower == "servings" {
+        return quantity;
+    }
+
+    // If units match, divide quantity by serving_size to get multiplier
+    // e.g., 200g ingredient / 100g serving_size = 2.0 servings
+    if unit_lower == serving_unit.to_lowercase() {
+        return quantity / serving_size;
+    }
+
+    // For mismatched units, assume quantity represents servings
+    // (user should use matching units for accuracy)
+    quantity
 }
 
 /// Recalculate and update cached nutrition for a recipe

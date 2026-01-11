@@ -88,6 +88,14 @@ add_recipe_ingredient(
 - Nutrition is automatically calculated and cached
 - Each food item can only be added once per recipe (use update to change quantity)
 
+**Unit handling:**
+- Use `unit: "serving"` when quantity represents number of servings (most common)
+  - e.g., `quantity: 1.0, unit: "serving"` = 1 serving of the food item
+  - e.g., `quantity: 0.5, unit: "serving"` = half a serving
+- Use matching units (g, ml, etc.) when specifying raw amounts
+  - e.g., `quantity: 200, unit: "g"` with a food item that has `serving_size: 100, serving_unit: "g"`
+  - This calculates: 200g / 100g per serving = 2 servings worth of nutrition
+
 ### Step 5: Log the Meal
 
 Now log the consumption to a specific day:
