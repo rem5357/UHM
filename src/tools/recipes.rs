@@ -91,6 +91,17 @@ pub struct RecipeUpdateSuccessResponse {
 
 /// Create a new recipe
 pub fn create_recipe(db: &Database, data: RecipeCreate) -> Result<CreateRecipeResponse, String> {
+    // Validate name
+    let name = data.name.trim();
+    if name.is_empty() {
+        return Err("Recipe name cannot be empty".to_string());
+    }
+
+    // Validate servings
+    if data.servings_produced <= 0.0 {
+        return Err("servings_produced must be greater than 0".to_string());
+    }
+
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
     let recipe = Recipe::create(&conn, &data)
@@ -222,6 +233,31 @@ pub fn add_recipe_ingredient(
     data: RecipeIngredientCreate,
 ) -> Result<AddIngredientResponse, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Validate recipe exists
+    let recipe = Recipe::get_by_id(&conn, data.recipe_id)
+        .map_err(|e| format!("Database error checking recipe: {}", e))?;
+    if recipe.is_none() {
+        return Err(format!("Recipe not found with id: {}", data.recipe_id));
+    }
+
+    // Validate food item exists
+    use crate::models::FoodItem;
+    let food_item = FoodItem::get_by_id(&conn, data.food_item_id)
+        .map_err(|e| format!("Database error checking food item: {}", e))?;
+    if food_item.is_none() {
+        return Err(format!("Food item not found with id: {}", data.food_item_id));
+    }
+
+    // Check if ingredient already exists in recipe
+    let existing = RecipeIngredient::get_for_recipe(&conn, data.recipe_id)
+        .map_err(|e| format!("Database error checking existing ingredients: {}", e))?;
+    if existing.iter().any(|i| i.food_item_id == data.food_item_id) {
+        return Err(format!(
+            "Food item {} is already an ingredient in recipe {}. Use update_recipe_ingredient to modify quantity.",
+            data.food_item_id, data.recipe_id
+        ));
+    }
 
     let ingredient = RecipeIngredient::create(&conn, &data)
         .map_err(|e| format!("Failed to add ingredient: {}", e))?;

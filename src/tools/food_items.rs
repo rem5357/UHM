@@ -126,6 +126,35 @@ pub struct UpdateSuccessResponse {
 
 /// Add a new food item
 pub fn add_food_item(db: &Database, data: FoodItemCreate) -> Result<AddFoodItemResponse, String> {
+    // Validate name
+    let name = data.name.trim();
+    if name.is_empty() {
+        return Err("Food item name cannot be empty".to_string());
+    }
+
+    // Validate serving info
+    if data.serving_size <= 0.0 {
+        return Err("serving_size must be greater than 0".to_string());
+    }
+    let unit = data.serving_unit.trim();
+    if unit.is_empty() {
+        return Err("serving_unit cannot be empty".to_string());
+    }
+
+    // Validate nutrition values are non-negative
+    if data.calories < 0.0 {
+        return Err("calories cannot be negative".to_string());
+    }
+    if data.protein < 0.0 {
+        return Err("protein cannot be negative".to_string());
+    }
+    if data.carbs < 0.0 {
+        return Err("carbs cannot be negative".to_string());
+    }
+    if data.fat < 0.0 {
+        return Err("fat cannot be negative".to_string());
+    }
+
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
     let item = FoodItem::create(&conn, &data)

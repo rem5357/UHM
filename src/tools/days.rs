@@ -242,7 +242,45 @@ pub fn log_meal(
     percent_eaten: Option<f64>,
     notes: Option<String>,
 ) -> Result<LogMealResponse, String> {
+    // Validate exactly one source is provided
+    if recipe_id.is_none() && food_item_id.is_none() {
+        return Err("Must provide either recipe_id or food_item_id".to_string());
+    }
+    if recipe_id.is_some() && food_item_id.is_some() {
+        return Err("Provide only one of recipe_id or food_item_id, not both".to_string());
+    }
+
+    // Validate servings
+    if servings <= 0.0 {
+        return Err("Servings must be greater than 0".to_string());
+    }
+
+    // Validate percent_eaten if provided
+    if let Some(pct) = percent_eaten {
+        if pct < 0.0 || pct > 100.0 {
+            return Err("percent_eaten must be between 0 and 100".to_string());
+        }
+    }
+
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Validate recipe exists if provided
+    if let Some(rid) = recipe_id {
+        let recipe = crate::models::Recipe::get_by_id(&conn, rid)
+            .map_err(|e| format!("Database error checking recipe: {}", e))?;
+        if recipe.is_none() {
+            return Err(format!("Recipe not found with id: {}", rid));
+        }
+    }
+
+    // Validate food item exists if provided
+    if let Some(fid) = food_item_id {
+        let food_item = crate::models::FoodItem::get_by_id(&conn, fid)
+            .map_err(|e| format!("Database error checking food item: {}", e))?;
+        if food_item.is_none() {
+            return Err(format!("Food item not found with id: {}", fid));
+        }
+    }
 
     // Get or create the day
     let day = Day::get_or_create(&conn, date)
