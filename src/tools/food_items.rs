@@ -118,6 +118,38 @@ pub struct UpdateFoodItemResponse {
     pub recipes_updated: Vec<i64>,  // Recipe IDs that had nutrition recalculated
 }
 
+/// Unused food item summary (safe to delete)
+#[derive(Debug, Serialize)]
+pub struct UnusedFoodItemSummary {
+    pub id: i64,
+    pub name: String,
+    pub brand: Option<String>,
+    pub preference: Preference,
+    pub created_at: String,
+}
+
+/// Response for list_unused_food_items
+#[derive(Debug, Serialize)]
+pub struct ListUnusedFoodItemsResponse {
+    pub items: Vec<UnusedFoodItemSummary>,
+    pub count: usize,
+}
+
+/// Response for delete_food_item blocked
+#[derive(Debug, Serialize)]
+pub struct DeleteFoodItemBlockedResponse {
+    pub error: String,
+    pub usage_count: i64,
+    pub used_in_recipes: Vec<String>,
+}
+
+/// Response for successful delete_food_item
+#[derive(Debug, Serialize)]
+pub struct DeleteFoodItemSuccessResponse {
+    pub success: bool,
+    pub deleted_id: i64,
+}
+
 /// Add a new food item
 pub fn add_food_item(db: &Database, data: FoodItemCreate) -> Result<AddFoodItemResponse, String> {
     // Validate name
@@ -264,4 +296,79 @@ pub fn update_food_item(
         }
         None => Err(format!("Food item not found with id: {}", id)),
     }
+}
+
+/// List food items with zero uses (not used in any recipe)
+/// These food items are safe to delete
+pub fn list_unused_food_items(db: &Database) -> Result<ListUnusedFoodItemsResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Find food items that are not used in any recipe_ingredients
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT f.id, f.name, f.brand, f.preference, f.created_at
+        FROM food_items f
+        WHERE NOT EXISTS (
+            SELECT 1 FROM recipe_ingredients ri WHERE ri.food_item_id = f.id
+        )
+        ORDER BY f.name ASC
+        "#
+    ).map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let items: Vec<UnusedFoodItemSummary> = stmt
+        .query_map([], |row| {
+            Ok(UnusedFoodItemSummary {
+                id: row.get("id")?,
+                name: row.get("name")?,
+                brand: row.get("brand")?,
+                preference: Preference::from_str(row.get::<_, String>("preference")?.as_str()),
+                created_at: row.get("created_at")?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect results: {}", e))?;
+
+    let count = items.len();
+
+    Ok(ListUnusedFoodItemsResponse { items, count })
+}
+
+/// Delete a food item (blocked if used in any recipe)
+pub fn delete_food_item(
+    db: &Database,
+    id: i64,
+) -> Result<Result<DeleteFoodItemSuccessResponse, DeleteFoodItemBlockedResponse>, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Check if food item exists
+    let food_item = FoodItem::get_by_id(&conn, id)
+        .map_err(|e| format!("Database error: {}", e))?;
+    if food_item.is_none() {
+        return Err(format!("Food item not found with id: {}", id));
+    }
+
+    // Check if used in any recipes
+    let usage_count = FoodItem::get_usage_count(&conn, id)
+        .map_err(|e| format!("Failed to check usage: {}", e))?;
+
+    if usage_count > 0 {
+        let used_in_recipes = FoodItem::get_used_in_recipes(&conn, id)
+            .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
+
+        return Ok(Err(DeleteFoodItemBlockedResponse {
+            error: format!("Cannot delete food item: used in {} recipe(s)", usage_count),
+            usage_count,
+            used_in_recipes,
+        }));
+    }
+
+    // Delete the food item
+    FoodItem::delete(&conn, id)
+        .map_err(|e| format!("Failed to delete food item: {}", e))?;
+
+    Ok(Ok(DeleteFoodItemSuccessResponse {
+        success: true,
+        deleted_id: id,
+    }))
 }

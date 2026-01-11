@@ -343,4 +343,17 @@ impl FoodItem {
         };
         Ok(count)
     }
+
+    /// Delete a food item (only if not used in any recipes)
+    /// Returns Ok(true) if deleted, Ok(false) if not found
+    pub fn delete(conn: &Connection, id: i64) -> DbResult<bool> {
+        // Check if food item exists
+        if Self::get_by_id(conn, id)?.is_none() {
+            return Ok(false);
+        }
+
+        // Delete will fail if used in recipe_ingredients due to foreign key constraint
+        let rows = conn.execute("DELETE FROM food_items WHERE id = ?1", [id])?;
+        Ok(rows > 0)
+    }
 }

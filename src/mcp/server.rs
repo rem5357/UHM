@@ -123,6 +123,12 @@ pub struct UpdateFoodItemParams {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteFoodItemParams {
+    /// Food item ID to delete
+    pub id: i64,
+}
+
 // ============================================================================
 // Recipe Parameter Structs
 // ============================================================================
@@ -434,6 +440,16 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Delete a food item (only allowed if not used in any recipes)")]
+    fn delete_food_item(&self, Parameters(p): Parameters<DeleteFoodItemParams>) -> Result<CallToolResult, McpError> {
+        let result = food_items::delete_food_item(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Ok(success) => serde_json::to_string_pretty(&success),
+            Err(blocked) => serde_json::to_string_pretty(&blocked),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     // --- Recipes ---
 
     #[tool(description = "Create a new recipe (ingredients added separately)")]
@@ -630,7 +646,14 @@ impl UhmService {
 
     // --- Cleanup/Maintenance ---
 
-    #[tool(description = "List all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete.")]
+    #[tool(description = "List all food items with zero uses (not used in any recipe). These are safe to delete with delete_food_item.")]
+    fn list_unused_food_items(&self) -> Result<CallToolResult, McpError> {
+        let result = food_items::list_unused_food_items(&self.database).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete with delete_recipe.")]
     fn list_unused_recipes(&self) -> Result<CallToolResult, McpError> {
         let result = recipes::list_unused_recipes(&self.database).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -666,12 +689,13 @@ impl ServerHandler for UhmService {
                 "Universal Health Manager (UHM) - Health and nutrition tracking. \
                  IMPORTANT: Call meal_instructions first when starting a food logging session \
                  to get step-by-step guidance on using the tools. \
-                 Tools: uhm_status, meal_instructions, add/search/get/list/update_food_item, \
+                 Tools: uhm_status, meal_instructions, add/search/get/list/update/delete_food_item, \
                  create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
                  add/update/remove_recipe_component, recalculate_recipe_nutrition, \
                  get_or_create_day/get_day/list_days/update_day, \
-                 log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition, \
-                 list_unused_recipes, list_orphaned_days."
+                 log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition. \
+                 Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days - \
+                 use these to find orphaned items, then delete with delete_food_item/delete_recipe."
                     .into(),
             ),
         }

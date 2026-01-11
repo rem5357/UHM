@@ -29,6 +29,7 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `get_food_item` - Get detailed food item info with recipe usage count
 - `list_food_items` - List with filtering, sorting, pagination
 - `update_food_item` - Update food item (auto-recalculates nutrition for recipes using it)
+- `delete_food_item` - Delete unused food items (blocked if used in any recipe)
 
 ### Phase 4: Recipe Tools
 - `create_recipe` - Create recipes (ingredients added separately)
@@ -65,9 +66,11 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `get_recipe` now returns both ingredients and components with full details
 
 ### Phase 8: Cleanup/Maintenance Tools
-- `list_unused_recipes` - Find all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete.
+- `list_unused_food_items` - Find all food items not used in any recipe. Safe to delete with `delete_food_item`.
+- `list_unused_recipes` - Find all recipes with zero uses (not logged in meals, not used as component in other recipes). Safe to delete with `delete_recipe`.
 - `list_orphaned_days` - Find all days with no meal entries. These are safe to delete.
 - Efficient SQL queries to quickly identify cleanup candidates
+- Workflow: Use list_unused_* tools to find orphans, then delete with corresponding delete tools
 
 ## Technology Stack
 
