@@ -334,6 +334,12 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Get step-by-step instructions for logging meals. Call this when starting a new food logging session or when unsure how to use the meal tracking tools.")]
+    fn meal_instructions(&self) -> Result<CallToolResult, McpError> {
+        use crate::tools::status::MEAL_INSTRUCTIONS;
+        Ok(CallToolResult::success(vec![Content::text(MEAL_INSTRUCTIONS)]))
+    }
+
     // --- Food Items ---
 
     #[tool(description = "Create a new food item with nutritional information")]
@@ -567,7 +573,9 @@ impl ServerHandler for UhmService {
             },
             instructions: Some(
                 "Universal Health Manager (UHM) - Health and nutrition tracking. \
-                 Tools: uhm_status, add/search/get/list/update_food_item, \
+                 IMPORTANT: Call meal_instructions first when starting a food logging session \
+                 to get step-by-step guidance on using the tools. \
+                 Tools: uhm_status, meal_instructions, add/search/get/list/update_food_item, \
                  create/get/list/update_recipe, add/update/remove_recipe_ingredient, \
                  recalculate_recipe_nutrition, get_or_create_day/get_day/list_days/update_day, \
                  log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition."
