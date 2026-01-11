@@ -35,6 +35,7 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `get_recipe` - Get full recipe with ingredients and calculated nutrition
 - `list_recipes` - List with search, favorites filter, sorting
 - `update_recipe` - Update metadata (blocked if logged in meals)
+- `delete_recipe` - Delete unused recipes (blocked if logged or used as component)
 - `add_recipe_ingredient` - Add food items to recipes
 - `update_recipe_ingredient` - Modify ingredient quantities
 - `remove_recipe_ingredient` - Remove ingredients

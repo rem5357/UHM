@@ -160,6 +160,7 @@ This returns all meals organized by type (breakfast/lunch/dinner/snack) with nut
 | Add new food item | `add_food_item` |
 | View food item details | `get_food_item` |
 | Create recipe | `create_recipe` |
+| Delete unused recipe | `delete_recipe` |
 | Add ingredient to recipe | `add_recipe_ingredient` |
 | Add sub-recipe to recipe | `add_recipe_component` |
 | View recipe with nutrition | `get_recipe` |
@@ -223,6 +224,9 @@ When you update a food item:
   - A food item used in the recipe is updated
 - Daily nutrition totals are cached and update when meals change
 - Recipes logged in meals cannot be modified (preserves historical accuracy)
+- Recipes can only be deleted if:
+  - Never logged in any meal entries (times_logged == 0)
+  - Not used as a component in any other recipe
 "#;
 
 /// Runtime status of the UHM service

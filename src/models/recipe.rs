@@ -273,4 +273,30 @@ impl Recipe {
         )?;
         Ok(count)
     }
+
+    /// Check if recipe is used as a component in other recipes
+    pub fn get_component_usage_count(conn: &Connection, id: i64) -> DbResult<i64> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM recipe_components WHERE component_recipe_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Delete a recipe (only if not logged and not used as component)
+    /// Returns Ok(true) if deleted, Ok(false) if not found
+    /// Returns Err with reason if deletion is blocked
+    pub fn delete(conn: &Connection, id: i64) -> DbResult<bool> {
+        // Check if recipe exists
+        if Self::get_by_id(conn, id)?.is_none() {
+            return Ok(false);
+        }
+
+        // Delete will cascade to recipe_ingredients
+        // recipe_components has ON DELETE RESTRICT for component_recipe_id,
+        // so it will fail if used as a component
+        let rows = conn.execute("DELETE FROM recipes WHERE id = ?1", [id])?;
+        Ok(rows > 0)
+    }
 }

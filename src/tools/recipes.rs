@@ -87,6 +87,21 @@ pub struct RecipeUpdateSuccessResponse {
     pub updated_at: String,
 }
 
+/// Response for delete blocked
+#[derive(Debug, Serialize)]
+pub struct RecipeDeleteBlockedResponse {
+    pub error: String,
+    pub times_logged: i64,
+    pub component_usage_count: i64,
+}
+
+/// Response for successful delete
+#[derive(Debug, Serialize)]
+pub struct RecipeDeleteSuccessResponse {
+    pub success: bool,
+    pub deleted_id: i64,
+}
+
 // ============================================================================
 // Recipe Tools
 // ============================================================================
@@ -227,6 +242,53 @@ pub fn update_recipe(
             times_logged: 0,
         })),
     }
+}
+
+/// Delete a recipe (blocked if logged in meals or used as component)
+pub fn delete_recipe(
+    db: &Database,
+    id: i64,
+) -> Result<Result<RecipeDeleteSuccessResponse, RecipeDeleteBlockedResponse>, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Check if recipe exists
+    let recipe = Recipe::get_by_id(&conn, id)
+        .map_err(|e| format!("Database error: {}", e))?;
+    if recipe.is_none() {
+        return Err(format!("Recipe not found with id: {}", id));
+    }
+
+    // Check if logged in meal entries
+    let times_logged = Recipe::get_times_logged(&conn, id)
+        .map_err(|e| format!("Failed to check meal usage: {}", e))?;
+
+    // Check if used as component in other recipes
+    let component_usage_count = Recipe::get_component_usage_count(&conn, id)
+        .map_err(|e| format!("Failed to check component usage: {}", e))?;
+
+    if times_logged > 0 || component_usage_count > 0 {
+        let mut reasons = Vec::new();
+        if times_logged > 0 {
+            reasons.push(format!("logged {} times in meal entries", times_logged));
+        }
+        if component_usage_count > 0 {
+            reasons.push(format!("used as component in {} other recipe(s)", component_usage_count));
+        }
+        return Ok(Err(RecipeDeleteBlockedResponse {
+            error: format!("Cannot delete recipe: {}", reasons.join(", ")),
+            times_logged,
+            component_usage_count,
+        }));
+    }
+
+    // Delete the recipe (cascades to recipe_ingredients and recipe_components where this is parent)
+    Recipe::delete(&conn, id)
+        .map_err(|e| format!("Failed to delete recipe: {}", e))?;
+
+    Ok(Ok(RecipeDeleteSuccessResponse {
+        success: true,
+        deleted_id: id,
+    }))
 }
 
 // ============================================================================

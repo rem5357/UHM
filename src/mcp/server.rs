@@ -185,6 +185,12 @@ pub struct UpdateRecipeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteRecipeParams {
+    /// Recipe ID to delete
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddRecipeIngredientParams {
     /// Recipe ID to add ingredient to
     pub recipe_id: i64,
@@ -460,6 +466,16 @@ impl UhmService {
     fn update_recipe(&self, Parameters(p): Parameters<UpdateRecipeParams>) -> Result<CallToolResult, McpError> {
         let data = RecipeUpdate { name: p.name, servings_produced: p.servings_produced, is_favorite: p.is_favorite, notes: p.notes };
         let result = recipes::update_recipe(&self.database, p.id, data).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Ok(success) => serde_json::to_string_pretty(&success),
+            Err(blocked) => serde_json::to_string_pretty(&blocked),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete a recipe (only allowed if not logged in meals and not used as a component in other recipes)")]
+    fn delete_recipe(&self, Parameters(p): Parameters<DeleteRecipeParams>) -> Result<CallToolResult, McpError> {
+        let result = recipes::delete_recipe(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
         let json = match result {
             Ok(success) => serde_json::to_string_pretty(&success),
             Err(blocked) => serde_json::to_string_pretty(&blocked),
