@@ -5,6 +5,7 @@
 mod day;
 mod food_item;
 mod meal_entry;
+mod medication;
 mod nutrition;
 mod recipe;
 mod recipe_component;
@@ -15,6 +16,10 @@ pub use food_item::{FoodItem, FoodItemCreate, FoodItemUpdate, Preference};
 pub use meal_entry::{
     MealEntry, MealEntryCreate, MealEntryDetail, MealEntryUpdate, MealType,
     calculate_day_nutrition, recalculate_day_nutrition,
+};
+pub use medication::{
+    Medication, MedicationCreate, MedicationUpdate, MedicationDeprecate,
+    MedType, DosageUnit,
 };
 pub use nutrition::Nutrition;
 pub use recipe::{Recipe, RecipeCreate, RecipeUpdate};

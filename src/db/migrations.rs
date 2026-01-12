@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -38,6 +38,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 2 {
         migrate_v2(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+    }
+
+    if current_version < 3 {
+        migrate_v3(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
     }
 
     Ok(())
@@ -259,6 +264,82 @@ fn migrate_v2(conn: &Connection) -> DbResult<()> {
 
         CREATE INDEX idx_recipe_components_recipe ON recipe_components(recipe_id);
         CREATE INDEX idx_recipe_components_component ON recipe_components(component_recipe_id);
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v3: Medications tracking
+fn migrate_v3(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- MEDICATIONS
+        -- Tracks prescriptions, supplements, OTC, and other medications
+        -- ============================================
+        CREATE TABLE medications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,                   -- e.g., "Lisinopril", "Vitamin D3"
+
+            -- Type of medication
+            med_type TEXT NOT NULL CHECK(med_type IN (
+                'prescription',
+                'supplement',
+                'otc',
+                'natural',
+                'compound',
+                'medical_device',
+                'other'
+            )),
+
+            -- Dosage information
+            dosage_amount REAL NOT NULL,          -- e.g., 10.0
+            dosage_unit TEXT NOT NULL CHECK(dosage_unit IN (
+                'mg',
+                'mcg',
+                'g',
+                'ml',
+                'fl_oz',
+                'pill',
+                'tablet',
+                'capsule',
+                'spray',
+                'drop',
+                'patch',
+                'injection',
+                'unit',
+                'iu',
+                'puff',
+                'other'
+            )),
+
+            -- Instructions and usage
+            instructions TEXT,                    -- e.g., "Take 1 tablet daily with food"
+            frequency TEXT,                       -- e.g., "twice daily", "PRN", "weekly"
+
+            -- Prescription-specific fields
+            prescribing_doctor TEXT,              -- Doctor's name (null for non-rx)
+            prescribed_date TEXT,                 -- Date prescribed (ISO format)
+            pharmacy TEXT,                        -- Pharmacy name
+            rx_number TEXT,                       -- Prescription number
+            refills_remaining INTEGER,            -- Number of refills left
+
+            -- Status tracking
+            is_active INTEGER NOT NULL DEFAULT 1, -- 1 = active, 0 = deprecated/inactive
+            start_date TEXT,                      -- When started taking
+            end_date TEXT,                        -- When stopped (if applicable)
+            discontinue_reason TEXT,              -- Why discontinued
+
+            -- Metadata
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_medications_name ON medications(name);
+        CREATE INDEX idx_medications_type ON medications(med_type);
+        CREATE INDEX idx_medications_active ON medications(is_active);
         "#,
     )?;
 

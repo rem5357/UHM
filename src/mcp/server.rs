@@ -19,9 +19,11 @@ use crate::models::{
     FoodItemCreate, FoodItemUpdate, Preference,
     RecipeCreate, RecipeUpdate, RecipeIngredientCreate, RecipeIngredientUpdate,
     RecipeComponentCreate, RecipeComponentUpdate,
+    MedicationCreate, MedicationUpdate, MedType, DosageUnit,
 };
 use crate::tools::days;
 use crate::tools::food_items;
+use crate::tools::medications;
 use crate::tools::recipes;
 use crate::tools::status::StatusTracker;
 
@@ -364,6 +366,132 @@ pub struct RecalculateDayNutritionParams {
 }
 
 // ============================================================================
+// Medication Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddMedicationParams {
+    /// Medication name (e.g., "Lisinopril", "Vitamin D3")
+    pub name: String,
+    /// Type: prescription, supplement, otc, natural, compound, medical_device, other
+    pub med_type: String,
+    /// Dosage amount (e.g., 10.0)
+    pub dosage_amount: f64,
+    /// Dosage unit: mg, mcg, g, ml, fl_oz, pill, tablet, capsule, spray, drop, patch, injection, unit, iu, puff, other
+    pub dosage_unit: String,
+    /// Instructions (e.g., "Take 1 tablet daily with food")
+    pub instructions: Option<String>,
+    /// Frequency (e.g., "twice daily", "PRN", "weekly")
+    pub frequency: Option<String>,
+    /// Prescribing doctor's name (for prescriptions)
+    pub prescribing_doctor: Option<String>,
+    /// Date prescribed (ISO format: YYYY-MM-DD)
+    pub prescribed_date: Option<String>,
+    /// Pharmacy name
+    pub pharmacy: Option<String>,
+    /// Prescription number
+    pub rx_number: Option<String>,
+    /// Number of refills remaining
+    pub refills_remaining: Option<i32>,
+    /// Date started taking (ISO format: YYYY-MM-DD)
+    pub start_date: Option<String>,
+    /// Notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetMedicationParams {
+    /// Medication ID
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListMedicationsParams {
+    /// Only show active medications (default true)
+    #[serde(default = "default_true")]
+    pub active_only: bool,
+    /// Filter by type: prescription, supplement, otc, natural, compound, medical_device, other
+    pub med_type: Option<String>,
+}
+
+fn default_true() -> bool { true }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchMedicationsParams {
+    /// Search query (matches name)
+    pub query: String,
+    /// Only show active medications (default true)
+    #[serde(default = "default_true")]
+    pub active_only: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateMedicationParams {
+    /// Medication ID
+    pub id: i64,
+    /// REQUIRED: Must be true to confirm the update
+    #[serde(default)]
+    pub force: bool,
+    /// New name
+    pub name: Option<String>,
+    /// New type
+    pub med_type: Option<String>,
+    /// New dosage amount
+    pub dosage_amount: Option<f64>,
+    /// New dosage unit
+    pub dosage_unit: Option<String>,
+    /// New instructions
+    pub instructions: Option<String>,
+    /// New frequency
+    pub frequency: Option<String>,
+    /// New prescribing doctor
+    pub prescribing_doctor: Option<String>,
+    /// New prescribed date
+    pub prescribed_date: Option<String>,
+    /// New pharmacy
+    pub pharmacy: Option<String>,
+    /// New rx number
+    pub rx_number: Option<String>,
+    /// New refills remaining
+    pub refills_remaining: Option<i32>,
+    /// New start date
+    pub start_date: Option<String>,
+    /// New notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeprecateMedicationParams {
+    /// Medication ID
+    pub id: i64,
+    /// End date (defaults to today if not provided)
+    pub end_date: Option<String>,
+    /// Reason for discontinuing
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReactivateMedicationParams {
+    /// Medication ID
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteMedicationParams {
+    /// Medication ID
+    pub id: i64,
+    /// REQUIRED: Must be true to confirm deletion
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExportMedicationsParams {
+    /// Patient name to display on the document
+    pub patient_name: String,
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -644,6 +772,117 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    // --- Medications ---
+
+    #[tool(description = "Add a new medication (prescription, supplement, OTC, natural remedy, etc.)")]
+    fn add_medication(&self, Parameters(p): Parameters<AddMedicationParams>) -> Result<CallToolResult, McpError> {
+        let data = MedicationCreate {
+            name: p.name,
+            med_type: MedType::from_str(&p.med_type),
+            dosage_amount: p.dosage_amount,
+            dosage_unit: DosageUnit::from_str(&p.dosage_unit),
+            instructions: p.instructions,
+            frequency: p.frequency,
+            prescribing_doctor: p.prescribing_doctor,
+            prescribed_date: p.prescribed_date,
+            pharmacy: p.pharmacy,
+            rx_number: p.rx_number,
+            refills_remaining: p.refills_remaining,
+            start_date: p.start_date,
+            notes: p.notes,
+        };
+        let result = medications::add_medication(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get full details for a medication")]
+    fn get_medication(&self, Parameters(p): Parameters<GetMedicationParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::get_medication(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(med) => serde_json::to_string_pretty(&med),
+            None => Ok(format!(r#"{{"error": "Medication not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List medications with optional filtering by active status and type")]
+    fn list_medications(&self, Parameters(p): Parameters<ListMedicationsParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::list_medications(&self.database, p.active_only, p.med_type.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Search medications by name")]
+    fn search_medications(&self, Parameters(p): Parameters<SearchMedicationsParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::search_medications(&self.database, &p.query, p.active_only)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update a medication. Requires force=true. For dosage changes, consider deprecating and adding new instead.")]
+    fn update_medication(&self, Parameters(p): Parameters<UpdateMedicationParams>) -> Result<CallToolResult, McpError> {
+        let data = MedicationUpdate {
+            name: p.name,
+            med_type: p.med_type.map(|s| MedType::from_str(&s)),
+            dosage_amount: p.dosage_amount,
+            dosage_unit: p.dosage_unit.map(|s| DosageUnit::from_str(&s)),
+            instructions: p.instructions,
+            frequency: p.frequency,
+            prescribing_doctor: p.prescribing_doctor,
+            prescribed_date: p.prescribed_date,
+            pharmacy: p.pharmacy,
+            rx_number: p.rx_number,
+            refills_remaining: p.refills_remaining,
+            start_date: p.start_date,
+            notes: p.notes,
+        };
+        let result = medications::update_medication(&self.database, p.id, data, p.force)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Ok(success) => serde_json::to_string_pretty(&success),
+            Err(blocked) => serde_json::to_string_pretty(&blocked),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Deprecate a medication (mark as inactive). Preferred over deletion to preserve history.")]
+    fn deprecate_medication(&self, Parameters(p): Parameters<DeprecateMedicationParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::deprecate_medication(&self.database, p.id, p.end_date.as_deref(), p.reason.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Reactivate a previously deprecated medication")]
+    fn reactivate_medication(&self, Parameters(p): Parameters<ReactivateMedicationParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::reactivate_medication(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete a medication. Requires force=true. Consider deprecating instead to preserve history.")]
+    fn delete_medication(&self, Parameters(p): Parameters<DeleteMedicationParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::delete_medication(&self.database, p.id, p.force)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Ok(success) => serde_json::to_string_pretty(&success),
+            Err(blocked) => serde_json::to_string_pretty(&blocked),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Export active medications to a formatted markdown document")]
+    fn export_medications_markdown(&self, Parameters(p): Parameters<ExportMedicationsParams>) -> Result<CallToolResult, McpError> {
+        let result = medications::export_medications_markdown(&self.database, &p.patient_name)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     // --- Cleanup/Maintenance ---
 
     #[tool(description = "List all food items with zero uses (not used in any recipe). These are safe to delete with delete_food_item.")]
@@ -687,15 +926,16 @@ impl ServerHandler for UhmService {
             },
             instructions: Some(
                 "Universal Health Manager (UHM) - Health and nutrition tracking. \
-                 IMPORTANT: Call meal_instructions first when starting a food logging session \
-                 to get step-by-step guidance on using the tools. \
-                 Tools: uhm_status, meal_instructions, add/search/get/list/update/delete_food_item, \
-                 create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
-                 add/update/remove_recipe_component, recalculate_recipe_nutrition, \
-                 get_or_create_day/get_day/list_days/update_day, \
-                 log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition. \
-                 Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days - \
-                 use these to find orphaned items, then delete with delete_food_item/delete_recipe."
+                 IMPORTANT: Call meal_instructions first when starting a food logging session. \
+                 Food: add/search/get/list/update/delete_food_item. \
+                 Recipes: create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
+                 add/update/remove_recipe_component, recalculate_recipe_nutrition. \
+                 Days: get_or_create_day/get_day/list_days/update_day. \
+                 Meals: log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition. \
+                 Medications: add/get/list/search/update/deprecate/reactivate/delete_medication, export_medications_markdown. \
+                 For medication dosage changes: deprecate old entry and add new one to preserve history. \
+                 update/delete_medication require force=true. \
+                 Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days."
                     .into(),
             ),
         }

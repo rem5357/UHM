@@ -72,6 +72,24 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - Efficient SQL queries to quickly identify cleanup candidates
 - Workflow: Use list_unused_* tools to find orphans, then delete with corresponding delete tools
 
+### Phase 9: Medication Tracking
+- **Types**: prescription, supplement, otc, natural, compound, medical_device, other
+- **Dosage units**: mg, mcg, g, ml, fl_oz, pill, tablet, capsule, spray, drop, patch, injection, unit, iu, puff, other
+- **Tools**:
+  - `add_medication` - Add a new medication with full details
+  - `get_medication` - Get full medication details
+  - `list_medications` - List with optional filtering by active status and type
+  - `search_medications` - Search by name
+  - `update_medication` - Update (requires force=true)
+  - `deprecate_medication` - Mark as inactive (preferred over deletion)
+  - `reactivate_medication` - Restore a deprecated medication
+  - `delete_medication` - Remove permanently (requires force=true)
+  - `export_medications_markdown` - Generate formatted markdown document
+- **Philosophy**: Medications should be deprecated, not deleted, to preserve history. For dosage changes, deprecate old and add new.
+- **Export**: Generates markdown with patient name, date/time, medications grouped by type (prescriptions first), includes doctor, pharmacy, instructions
+- **Prescription fields**: prescribing_doctor, prescribed_date, pharmacy, rx_number, refills_remaining
+- **Tracking fields**: start_date, end_date, discontinue_reason, is_active
+
 ## Technology Stack
 
 ### Rust
@@ -160,13 +178,15 @@ D:\Projects\UHM\
 │   │   ├── recipe_ingredient.rs  # Recipe ingredients + nutrition calc
 │   │   ├── recipe_component.rs   # Recipe components (sub-recipes)
 │   │   ├── day.rs          # Day CRUD
-│   │   └── meal_entry.rs   # MealEntry CRUD + day nutrition calc
+│   │   ├── meal_entry.rs   # MealEntry CRUD + day nutrition calc
+│   │   └── medication.rs   # Medication CRUD
 │   ├── tools/
 │   │   ├── mod.rs
 │   │   ├── status.rs       # uhm_status implementation
 │   │   ├── food_items.rs   # Food item tool functions
 │   │   ├── recipes.rs      # Recipe tool functions
-│   │   └── days.rs         # Day and meal entry tool functions
+│   │   ├── days.rs         # Day and meal entry tool functions
+│   │   └── medications.rs  # Medication tool functions
 │   └── mcp/
 │       ├── mod.rs
 │       └── server.rs       # MCP server, all tool definitions
