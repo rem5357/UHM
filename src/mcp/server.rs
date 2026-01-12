@@ -26,6 +26,7 @@ use crate::tools::food_items;
 use crate::tools::medications;
 use crate::tools::recipes;
 use crate::tools::status::StatusTracker;
+use crate::tools::vitals;
 
 /// UHM MCP Service
 #[derive(Clone)]
@@ -492,6 +493,125 @@ pub struct ExportMedicationsParams {
 }
 
 // ============================================================================
+// Vital Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CreateVitalGroupParams {
+    /// Description of the group (e.g., "BP & HR reading", "Post Exercise")
+    pub description: Option<String>,
+    /// Timestamp (defaults to now if not provided)
+    pub timestamp: Option<String>,
+    /// Notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetVitalGroupParams {
+    /// Vital group ID
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListVitalGroupsParams {
+    /// Maximum number of groups to return
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateVitalGroupParams {
+    /// Vital group ID
+    pub id: i64,
+    /// New description
+    pub description: Option<String>,
+    /// New notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteVitalGroupParams {
+    /// Vital group ID (vitals will be unlinked but not deleted)
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddVitalParams {
+    /// Vital type: weight, blood_pressure (bp), heart_rate (hr/pulse), oxygen_saturation (o2/spo2), glucose
+    pub vital_type: String,
+    /// Primary value (weight, systolic BP, heart rate, O2%, glucose)
+    pub value1: f64,
+    /// Secondary value (diastolic BP - required for blood_pressure)
+    pub value2: Option<f64>,
+    /// Unit (defaults to standard for vital type: lbs, mmHg, bpm, %, mg/dL)
+    pub unit: Option<String>,
+    /// Timestamp (defaults to now if not provided)
+    pub timestamp: Option<String>,
+    /// Group ID to associate with related readings
+    pub group_id: Option<i64>,
+    /// Notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetVitalParams {
+    /// Vital ID
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListVitalsByTypeParams {
+    /// Vital type: weight, blood_pressure, heart_rate, oxygen_saturation, glucose
+    pub vital_type: String,
+    /// Maximum results
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListRecentVitalsParams {
+    /// Maximum results (default 20)
+    #[serde(default = "default_search_limit")]
+    pub limit: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListVitalsByDateRangeParams {
+    /// Start date (ISO format: YYYY-MM-DD or full timestamp)
+    pub start_date: String,
+    /// End date (ISO format: YYYY-MM-DD or full timestamp)
+    pub end_date: String,
+    /// Filter by vital type (optional)
+    pub vital_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateVitalParams {
+    /// Vital ID
+    pub id: i64,
+    /// New primary value
+    pub value1: Option<f64>,
+    /// New secondary value (for blood pressure)
+    pub value2: Option<f64>,
+    /// New unit
+    pub unit: Option<String>,
+    /// New notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AssignVitalToGroupParams {
+    /// Vital ID
+    pub vital_id: i64,
+    /// Group ID (or null to remove from group)
+    pub group_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteVitalParams {
+    /// Vital ID
+    pub id: i64,
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -911,6 +1031,144 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // --- Vitals ---
+
+    #[tool(description = "Get step-by-step instructions for tracking vitals. Call this when starting a vital tracking session or when unsure how to use the vital tools.")]
+    fn vital_instructions(&self) -> Result<CallToolResult, McpError> {
+        use crate::tools::status::VITAL_INSTRUCTIONS;
+        Ok(CallToolResult::success(vec![Content::text(VITAL_INSTRUCTIONS)]))
+    }
+
+    #[tool(description = "Create a vital group to link related readings together (e.g., BP + HR taken at the same time)")]
+    fn create_vital_group(&self, Parameters(p): Parameters<CreateVitalGroupParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::create_vital_group(&self.database, p.description.as_deref(), p.timestamp.as_deref(), p.notes.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get a vital group with all its linked vital readings")]
+    fn get_vital_group(&self, Parameters(p): Parameters<GetVitalGroupParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::get_vital_group(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(group) => serde_json::to_string_pretty(&group),
+            None => Ok(format!(r#"{{"error": "Vital group not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List vital groups with summary of linked vitals")]
+    fn list_vital_groups(&self, Parameters(p): Parameters<ListVitalGroupsParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::list_vital_groups(&self.database, p.limit)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update a vital group's description or notes")]
+    fn update_vital_group(&self, Parameters(p): Parameters<UpdateVitalGroupParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::update_vital_group(&self.database, p.id, p.description.as_deref(), p.notes.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(group) => serde_json::to_string_pretty(&group),
+            None => Ok(format!(r#"{{"error": "Vital group not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete a vital group (vitals are unlinked but not deleted)")]
+    fn delete_vital_group(&self, Parameters(p): Parameters<DeleteVitalGroupParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::delete_vital_group(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Add a vital reading (weight, blood_pressure, heart_rate, oxygen_saturation, glucose)")]
+    fn add_vital(&self, Parameters(p): Parameters<AddVitalParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::add_vital(
+            &self.database,
+            &p.vital_type,
+            p.value1,
+            p.value2,
+            p.unit.as_deref(),
+            p.timestamp.as_deref(),
+            p.group_id,
+            p.notes.as_deref(),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get a vital reading by ID")]
+    fn get_vital(&self, Parameters(p): Parameters<GetVitalParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::get_vital(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(vital) => serde_json::to_string_pretty(&vital),
+            None => Ok(format!(r#"{{"error": "Vital not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List vitals by type (e.g., all weight readings or all blood pressure readings)")]
+    fn list_vitals_by_type(&self, Parameters(p): Parameters<ListVitalsByTypeParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::list_vitals_by_type(&self.database, &p.vital_type, p.limit)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List recent vitals across all types")]
+    fn list_recent_vitals(&self, Parameters(p): Parameters<ListRecentVitalsParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::list_recent_vitals(&self.database, p.limit)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List vitals within a date range, optionally filtered by type")]
+    fn list_vitals_by_date_range(&self, Parameters(p): Parameters<ListVitalsByDateRangeParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::list_vitals_by_date_range(&self.database, &p.start_date, &p.end_date, p.vital_type.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get the latest reading for each vital type")]
+    fn get_latest_vitals(&self) -> Result<CallToolResult, McpError> {
+        let result = vitals::get_latest_vitals(&self.database)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update a vital reading's values or notes")]
+    fn update_vital(&self, Parameters(p): Parameters<UpdateVitalParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::update_vital(&self.database, p.id, p.value1, p.value2, p.unit.as_deref(), p.notes.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(resp) => serde_json::to_string_pretty(&resp),
+            None => Ok(format!(r#"{{"error": "Vital not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Assign a vital to a group (or remove from group by passing null)")]
+    fn assign_vital_to_group(&self, Parameters(p): Parameters<AssignVitalToGroupParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::assign_vital_to_group(&self.database, p.vital_id, p.group_id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete a vital reading")]
+    fn delete_vital(&self, Parameters(p): Parameters<DeleteVitalParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::delete_vital(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ============================================================================
@@ -931,8 +1189,8 @@ impl ServerHandler for UhmService {
                 website_url: None,
             },
             instructions: Some(
-                "Universal Health Manager (UHM) - Health and nutrition tracking. \
-                 IMPORTANT: Call meal_instructions when starting food logging, medication_instructions when managing meds. \
+                "Universal Health Manager (UHM) - Health, nutrition, and vital sign tracking. \
+                 IMPORTANT: Call meal_instructions for food logging, medication_instructions for meds, vital_instructions for vitals. \
                  Food: add/search/get/list/update/delete_food_item. \
                  Recipes: create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
                  add/update/remove_recipe_component, recalculate_recipe_nutrition. \
@@ -941,6 +1199,8 @@ impl ServerHandler for UhmService {
                  Medications: add/get/list/search/update/deprecate/reactivate/delete_medication, export_medications_markdown. \
                  For medication dosage changes: deprecate old entry and add new one to preserve history. \
                  update/delete_medication require force=true. \
+                 Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals. \
+                 Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days."
                     .into(),
             ),

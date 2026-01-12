@@ -460,6 +460,175 @@ list_medications(med_type: "supplement")
 - The force flag protects against accidental changes
 "#;
 
+/// Vital tracking instructions for AI assistants
+pub const VITAL_INSTRUCTIONS: &str = r#"
+# UHM Vital Sign Tracking Instructions
+
+This guide explains how to track vital signs using the Universal Health Manager (UHM) tools.
+
+## Overview
+
+The vitals system tracks:
+- **Weight** - Body weight in lbs or kg
+- **Blood Pressure** - Systolic/diastolic in mmHg
+- **Heart Rate** - Beats per minute (bpm)
+- **Oxygen Saturation** - SpO2 percentage
+- **Glucose** - Blood sugar in mg/dL
+
+## Key Concepts
+
+### Vital Groups
+Vital groups link related readings taken at the same time. For example:
+- Blood pressure + heart rate from the same measurement session
+- Post-exercise readings (BP, HR, O2)
+- Morning vitals check (weight, BP, HR)
+
+Groups have a description (e.g., "BP & HR reading", "Post Exercise") and can contain any combination of vital types.
+
+### Standalone Vitals
+Vitals can be recorded without a group for quick, individual readings (e.g., a quick weight check).
+
+## Step-by-Step Workflows
+
+### Recording a Single Vital
+
+```
+add_vital(
+  vital_type: "weight",
+  value1: 185.5,
+  unit: "lbs"
+)
+```
+
+### Recording Related Vitals (BP + HR)
+
+**Step 1: Create a group**
+```
+create_vital_group(
+  description: "Morning BP & HR"
+)
+```
+Returns the group ID.
+
+**Step 2: Add vitals to the group**
+```
+add_vital(
+  vital_type: "blood_pressure",
+  value1: 120,           // systolic
+  value2: 80,            // diastolic (required for BP)
+  group_id: 1
+)
+
+add_vital(
+  vital_type: "heart_rate",
+  value1: 72,
+  group_id: 1
+)
+```
+
+**Step 3: View the group**
+```
+get_vital_group(id: 1)
+```
+Returns the group with all linked vitals.
+
+### Linking Existing Vitals to a Group
+
+If you've already recorded vitals separately:
+```
+assign_vital_to_group(vital_id: 5, group_id: 1)
+assign_vital_to_group(vital_id: 6, group_id: 1)
+```
+
+### Removing a Vital from a Group
+
+```
+assign_vital_to_group(vital_id: 5, group_id: null)
+```
+The vital remains but is no longer linked to any group.
+
+## Vital Types and Values
+
+| Type | value1 | value2 | Default Unit |
+|------|--------|--------|--------------|
+| weight | Weight | - | lbs |
+| blood_pressure | Systolic | Diastolic (required) | mmHg |
+| heart_rate | BPM | - | bpm |
+| oxygen_saturation | SpO2 % | - | % |
+| glucose | mg/dL | - | mg/dL |
+
+### Type Aliases
+You can use these shortcuts when specifying vital_type:
+- `bp` = blood_pressure
+- `hr` or `pulse` = heart_rate
+- `o2` or `spo2` = oxygen_saturation
+
+## Quick Reference
+
+| Task | Tool |
+|------|------|
+| Record a vital | `add_vital` |
+| Get vital details | `get_vital` |
+| Update a vital | `update_vital` |
+| Delete a vital | `delete_vital` |
+| List by type | `list_vitals_by_type` |
+| List recent | `list_recent_vitals` |
+| List by date range | `list_vitals_by_date_range` |
+| Get latest of each type | `get_latest_vitals` |
+| Create group | `create_vital_group` |
+| View group with vitals | `get_vital_group` |
+| List groups | `list_vital_groups` |
+| Update group | `update_vital_group` |
+| Delete group | `delete_vital_group` |
+| Link vital to group | `assign_vital_to_group` |
+
+## Common Scenarios
+
+### Quick Weight Check
+```
+add_vital(vital_type: "weight", value1: 182.3)
+```
+
+### Full Blood Pressure Reading (with HR)
+1. `create_vital_group(description: "BP & HR")`
+2. `add_vital(vital_type: "bp", value1: 118, value2: 76, group_id: 1)`
+3. `add_vital(vital_type: "hr", value1: 68, group_id: 1)`
+
+### Post-Exercise Vitals
+1. `create_vital_group(description: "Post-Exercise", notes: "After 30 min run")`
+2. `add_vital(vital_type: "bp", value1: 135, value2: 85, group_id: 2)`
+3. `add_vital(vital_type: "hr", value1: 125, group_id: 2)`
+4. `add_vital(vital_type: "o2", value1: 96, group_id: 2)`
+
+### View Weight History
+```
+list_vitals_by_type(vital_type: "weight", limit: 30)
+```
+
+### Check Latest Readings
+```
+get_latest_vitals()
+```
+Returns the most recent reading for each vital type.
+
+### Find Vitals in a Date Range
+```
+list_vitals_by_date_range(
+  start_date: "2026-01-01",
+  end_date: "2026-01-31",
+  vital_type: "blood_pressure"  // optional filter
+)
+```
+
+## Notes
+
+- Timestamps default to current time if not provided
+- Blood pressure requires both value1 (systolic) and value2 (diastolic)
+- Deleting a group unlinks vitals but doesn't delete them
+- Use unit parameter to override default (e.g., "kg" instead of "lbs" for weight)
+- Vitals can be added to a group at creation time or linked later
+"#;
+
 /// Runtime status of the UHM service
 #[derive(Debug, Clone, Serialize)]
 pub struct UhmStatus {

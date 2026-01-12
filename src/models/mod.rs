@@ -10,6 +10,7 @@ mod nutrition;
 mod recipe;
 mod recipe_component;
 mod recipe_ingredient;
+mod vital;
 
 pub use day::{Day, DayCreate, DayUpdate};
 pub use food_item::{FoodItem, FoodItemCreate, FoodItemUpdate, Preference};
@@ -30,4 +31,7 @@ pub use recipe_component::{
 pub use recipe_ingredient::{
     RecipeIngredient, RecipeIngredientCreate, RecipeIngredientDetail,
     RecipeIngredientUpdate, recalculate_recipe_nutrition,
+};
+pub use vital::{
+    Vital, VitalCreate, VitalGroup, VitalGroupCreate, VitalType, VitalUpdate,
 };

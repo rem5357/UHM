@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -43,6 +43,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 3 {
         migrate_v3(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (3)", [])?;
+    }
+
+    if current_version < 4 {
+        migrate_v4(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
     }
 
     Ok(())
@@ -340,6 +345,35 @@ fn migrate_v3(conn: &Connection) -> DbResult<()> {
         CREATE INDEX idx_medications_name ON medications(name);
         CREATE INDEX idx_medications_type ON medications(med_type);
         CREATE INDEX idx_medications_active ON medications(is_active);
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v4: Vital groups for linking related readings
+fn migrate_v4(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- VITAL GROUPS
+        -- Links related vital readings together
+        -- (e.g., BP + HR taken at the same time)
+        -- ============================================
+        CREATE TABLE vital_groups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            description TEXT,                     -- e.g., "BP & HR reading", "Post Exercise"
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_vital_groups_timestamp ON vital_groups(timestamp);
+
+        -- Add group_id to vitals table (nullable for standalone readings)
+        ALTER TABLE vitals ADD COLUMN group_id INTEGER REFERENCES vital_groups(id);
+
+        CREATE INDEX idx_vitals_group ON vitals(group_id);
         "#,
     )?;
 

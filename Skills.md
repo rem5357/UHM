@@ -21,7 +21,8 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `recipe_ingredients` - Junction table linking food items to recipes
   - `days` - Daily containers with cached nutrition totals
   - `meal_entries` - Logged food consumption
-  - `vitals` - Health measurements (schema ready, tools pending)
+  - `vitals` - Health measurements with optional group linking
+  - `vital_groups` - Groups related vital readings together
 
 ### Phase 3: Food Item Tools
 - `add_food_item` - Create food items with full nutritional data
@@ -89,6 +90,32 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - **Export**: Generates markdown with patient name, date/time, medications grouped by type (prescriptions first), includes doctor, pharmacy, instructions
 - **Prescription fields**: prescribing_doctor, prescribed_date, pharmacy, rx_number, refills_remaining
 - **Tracking fields**: start_date, end_date, discontinue_reason, is_active
+
+### Phase 10: Vitals Tracking
+- **Vital Types**: weight, blood_pressure, heart_rate, oxygen_saturation, glucose
+- **Units**: lbs/kg, mmHg, bpm, %, mg/dL
+- **Vital Groups**: Link related readings together (e.g., BP + HR taken at same time)
+- **Tools**:
+  - `add_vital` - Record a vital reading with optional group association
+  - `get_vital` - Get vital details
+  - `update_vital` - Update values or notes
+  - `delete_vital` - Remove a vital reading
+  - `list_vitals_by_type` - List readings for a specific vital type
+  - `list_recent_vitals` - List recent readings across all types
+  - `list_vitals_by_date_range` - Query by date range with optional type filter
+  - `get_latest_vitals` - Get most recent reading for each vital type
+  - `create_vital_group` - Create a group to link related readings
+  - `get_vital_group` - Get group with all linked vitals
+  - `list_vital_groups` - List groups with vital summaries
+  - `update_vital_group` - Update group description/notes
+  - `delete_vital_group` - Delete group (unlinks vitals but doesn't delete them)
+  - `assign_vital_to_group` - Link or unlink a vital to/from a group
+  - `vital_instructions` - Instructions for using vital tracking tools
+- **Use Cases**:
+  - Quick standalone readings (e.g., weight check)
+  - Grouped readings (e.g., BP + HR from same measurement session)
+  - Post-exercise vitals (BP, HR, O2 grouped together)
+  - Retroactive grouping (link existing vitals to a new group)
 
 ## Technology Stack
 
@@ -179,14 +206,16 @@ D:\Projects\UHM\
 │   │   ├── recipe_component.rs   # Recipe components (sub-recipes)
 │   │   ├── day.rs          # Day CRUD
 │   │   ├── meal_entry.rs   # MealEntry CRUD + day nutrition calc
-│   │   └── medication.rs   # Medication CRUD
+│   │   ├── medication.rs   # Medication CRUD
+│   │   └── vital.rs        # Vital and VitalGroup CRUD
 │   ├── tools/
 │   │   ├── mod.rs
-│   │   ├── status.rs       # uhm_status implementation
+│   │   ├── status.rs       # uhm_status implementation + instructions
 │   │   ├── food_items.rs   # Food item tool functions
 │   │   ├── recipes.rs      # Recipe tool functions
 │   │   ├── days.rs         # Day and meal entry tool functions
-│   │   └── medications.rs  # Medication tool functions
+│   │   ├── medications.rs  # Medication tool functions
+│   │   └── vitals.rs       # Vital tool functions
 │   └── mcp/
 │       ├── mod.rs
 │       └── server.rs       # MCP server, all tool definitions
@@ -197,7 +226,6 @@ D:\Projects\UHM\
 ## Todo / Future Work
 
 ### Pending Implementation
-- [ ] Vitals tracking tools (weight, blood pressure, heart rate, oxygen, glucose)
 - [ ] Unit conversion utilities (grams ↔ oz, ml ↔ cups, etc.)
 - [ ] Nutrition goals and daily targets
 - [ ] Weekly/monthly nutrition reports

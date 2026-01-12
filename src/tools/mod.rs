@@ -7,3 +7,4 @@ pub mod food_items;
 pub mod medications;
 pub mod recipes;
 pub mod status;
+pub mod vitals;
