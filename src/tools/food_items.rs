@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::db::Database;
 use crate::models::{FoodItem, FoodItemCreate, FoodItemUpdate, Preference};
+use crate::nutrition::BaseUnitType;
 
 /// Response for add_food_item
 #[derive(Debug, Serialize)]
@@ -68,6 +69,12 @@ pub struct FoodItemDetail {
     pub cholesterol: f64,
     pub preference: Preference,
     pub notes: Option<String>,
+    /// Base unit type (weight, volume, or count)
+    pub base_unit_type: Option<BaseUnitType>,
+    /// Grams per serving (for unit conversion calculations)
+    pub grams_per_serving: Option<f64>,
+    /// Milliliters per serving (for unit conversion calculations)
+    pub ml_per_serving: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
     pub recipe_usage_count: i64,
@@ -101,6 +108,9 @@ impl FoodItemDetail {
             cholesterol: item.nutrition.cholesterol,
             preference: item.preference,
             notes: item.notes,
+            base_unit_type: item.base_unit_type,
+            grams_per_serving: item.grams_per_serving,
+            ml_per_serving: item.ml_per_serving,
             created_at: item.created_at,
             updated_at: item.updated_at,
             recipe_usage_count,
@@ -125,7 +135,8 @@ pub struct ListFoodItemsResponse {
 pub struct UpdateFoodItemResponse {
     pub success: bool,
     pub updated_at: String,
-    pub recipes_updated: Vec<i64>,  // Recipe IDs that had nutrition recalculated
+    pub recipes_recalculated: i64,  // Number of recipes that had nutrition recalculated
+    pub days_recalculated: i64,     // Number of days that had nutrition recalculated
 }
 
 /// Unused food item summary (safe to delete)
@@ -284,36 +295,30 @@ pub fn list_food_items(
     })
 }
 
-/// Update a food item (automatically recalculates nutrition for recipes using this item)
+/// Update a food item (automatically recalculates nutrition for all affected recipes and days)
 pub fn update_food_item(
     db: &Database,
     id: i64,
     data: FoodItemUpdate,
 ) -> Result<UpdateFoodItemResponse, String> {
-    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+    use crate::models::cascade_recalculate_from_food_item;
 
-    // Get recipes using this food item (for recalculation after update)
-    let recipe_ids = FoodItem::get_recipe_ids_using_item(&conn, id)
-        .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
     let updated = FoodItem::update(&conn, id, &data)
         .map_err(|e| format!("Failed to update food item: {}", e))?;
 
     match updated {
         Some(item) => {
-            // Recalculate nutrition for all recipes using this food item
-            let mut recipes_updated = Vec::new();
-            for recipe_id in &recipe_ids {
-                use crate::models::recalculate_recipe_nutrition;
-                recalculate_recipe_nutrition(&conn, *recipe_id)
-                    .map_err(|e| format!("Failed to recalculate recipe {}: {}", recipe_id, e))?;
-                recipes_updated.push(*recipe_id);
-            }
+            // Cascade recalculation: updates all affected recipes and days
+            let cascade_result = cascade_recalculate_from_food_item(&conn, id)
+                .map_err(|e| format!("Failed to cascade recalculation: {}", e))?;
 
             Ok(UpdateFoodItemResponse {
                 success: true,
                 updated_at: item.updated_at,
-                recipes_updated,
+                recipes_recalculated: cascade_result.recipes_recalculated,
+                days_recalculated: cascade_result.days_recalculated,
             })
         }
         None => Err(format!("Food item not found with id: {}", id)),

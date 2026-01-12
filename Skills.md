@@ -117,6 +117,33 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - Post-exercise vitals (BP, HR, O2 grouped together)
   - Retroactive grouping (link existing vitals to a new group)
 
+### Phase 11: Unit Management Module (UMM)
+- **Purpose**: Comprehensive unit conversion system for accurate recipe nutrition calculations
+- **Problem Solved**: Fixed bug where "8 tbsp" of a "2 tbsp (20g)" serving calculated 8x nutrition instead of 4x
+- **New Database Fields** (Migration v5):
+  - `base_unit_type` - weight, volume, or count
+  - `grams_per_serving` - Total grams in one serving (for weight-based calculations)
+  - `ml_per_serving` - Total ml in one serving (for volume-based calculations)
+  - `food_item_conversions` table - Custom unit conversions per food item (scoop, slice, etc.)
+- **Unit Categories**:
+  - **Weight**: g, oz, lb, kg (converts to grams)
+  - **Volume**: tbsp, tsp, cup, ml, fl oz (converts to ml)
+  - **Count**: each, piece, slice (uses grams_per_serving)
+  - **Custom**: scoop, patty (requires food_item_conversions entry)
+- **Smart Unit Parsing**:
+  - Parses compound units like "tbsp (20g)" to extract gram weight
+  - Auto-infers base_unit_type and grams/ml values from serving_unit
+- **Cascading Recalculation**:
+  - When a food item is updated, ALL affected data is automatically recalculated:
+    1. All recipes using that food item as an ingredient
+    2. All parent recipes using those recipes as components (recursive)
+    3. All days with meal entries for affected recipes
+  - Response shows `recipes_recalculated` and `days_recalculated` counts
+- **Files**:
+  - `src/nutrition/units.rs` - Unit types, categories, conversion constants
+  - `src/nutrition/converter.rs` - Unit parsing and conversion functions
+  - `src/db/migrations.rs` - Migration v5 with auto-migration of existing data
+
 ## Technology Stack
 
 ### Rust

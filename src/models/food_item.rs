@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::db::DbResult;
+use crate::nutrition::BaseUnitType;
 use super::Nutrition;
 
 /// Food preference
@@ -47,6 +48,12 @@ pub struct FoodItem {
     pub nutrition: Nutrition,
     pub preference: Preference,
     pub notes: Option<String>,
+    /// Base unit type for this food item (weight, volume, or count)
+    pub base_unit_type: Option<BaseUnitType>,
+    /// Grams per serving (for weight-based and count items with known weight)
+    pub grams_per_serving: Option<f64>,
+    /// Milliliters per serving (for volume-based items)
+    pub ml_per_serving: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -75,6 +82,12 @@ pub struct FoodItemCreate {
     #[serde(default)]
     pub preference: Preference,
     pub notes: Option<String>,
+    /// Override auto-detected base unit type
+    pub base_unit_type: Option<BaseUnitType>,
+    /// Override auto-calculated grams per serving
+    pub grams_per_serving: Option<f64>,
+    /// Override auto-calculated ml per serving
+    pub ml_per_serving: Option<f64>,
 }
 
 /// Data for updating a food item
@@ -95,11 +108,22 @@ pub struct FoodItemUpdate {
     pub cholesterol: Option<f64>,
     pub preference: Option<Preference>,
     pub notes: Option<String>,
+    /// Override base unit type
+    pub base_unit_type: Option<BaseUnitType>,
+    /// Override grams per serving
+    pub grams_per_serving: Option<f64>,
+    /// Override ml per serving
+    pub ml_per_serving: Option<f64>,
 }
 
 impl FoodItem {
     /// Create a FoodItem from a database row
     fn from_row(row: &Row) -> rusqlite::Result<Self> {
+        // Parse base_unit_type from string
+        let base_unit_type: Option<BaseUnitType> = row
+            .get::<_, Option<String>>("base_unit_type")?
+            .and_then(|s| BaseUnitType::from_str(&s));
+
         Ok(Self {
             id: row.get("id")?,
             name: row.get("name")?,
@@ -119,6 +143,9 @@ impl FoodItem {
             },
             preference: Preference::from_str(row.get::<_, String>("preference")?.as_str()),
             notes: row.get("notes")?,
+            base_unit_type,
+            grams_per_serving: row.get("grams_per_serving")?,
+            ml_per_serving: row.get("ml_per_serving")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -126,13 +153,28 @@ impl FoodItem {
 
     /// Insert a new food item into the database
     pub fn create(conn: &Connection, data: &FoodItemCreate) -> DbResult<Self> {
+        use crate::nutrition::{
+            calculate_grams_per_serving, calculate_ml_per_serving, infer_base_unit_type,
+        };
+
+        // Auto-calculate unit conversion fields if not provided
+        let base_unit_type = data
+            .base_unit_type
+            .unwrap_or_else(|| infer_base_unit_type(&data.serving_unit));
+        let grams_per_serving = data
+            .grams_per_serving
+            .or_else(|| calculate_grams_per_serving(data.serving_size, &data.serving_unit));
+        let ml_per_serving = data
+            .ml_per_serving
+            .or_else(|| calculate_ml_per_serving(data.serving_size, &data.serving_unit));
+
         conn.execute(
             r#"
             INSERT INTO food_items (
                 name, brand, serving_size, serving_unit,
                 calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol,
-                preference, notes
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                preference, notes, base_unit_type, grams_per_serving, ml_per_serving
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 data.name,
@@ -150,6 +192,9 @@ impl FoodItem {
                 data.cholesterol,
                 data.preference.as_str(),
                 data.notes,
+                base_unit_type.to_db_str(),
+                grams_per_serving,
+                ml_per_serving,
             ],
         )?;
 
@@ -235,6 +280,17 @@ impl FoodItem {
 
     /// Update a food item
     pub fn update(conn: &Connection, id: i64, data: &FoodItemUpdate) -> DbResult<Option<Self>> {
+        use crate::nutrition::{
+            calculate_grams_per_serving, calculate_ml_per_serving, infer_base_unit_type,
+        };
+
+        // Get the current food item to determine if we need to recalculate unit fields
+        let current = Self::get_by_id(conn, id)?;
+        let current = match current {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
         // Build dynamic UPDATE query
         let mut updates = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -268,12 +324,52 @@ impl FoodItem {
             params_vec.push(Box::new(pref.as_str().to_string()));
         }
 
+        // Handle unit conversion fields
+        // If serving_size or serving_unit changed, recalculate unless explicitly overridden
+        let serving_size = data.serving_size.unwrap_or(current.serving_size);
+        let serving_unit = data
+            .serving_unit
+            .as_ref()
+            .unwrap_or(&current.serving_unit);
+        let serving_changed =
+            data.serving_size.is_some() || data.serving_unit.is_some();
+
+        // base_unit_type
+        if let Some(ref but) = data.base_unit_type {
+            updates.push(format!("base_unit_type = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(but.to_db_str().to_string()));
+        } else if serving_changed {
+            let inferred = infer_base_unit_type(serving_unit);
+            updates.push(format!("base_unit_type = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(inferred.to_db_str().to_string()));
+        }
+
+        // grams_per_serving
+        if let Some(gps) = data.grams_per_serving {
+            updates.push(format!("grams_per_serving = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(gps));
+        } else if serving_changed {
+            let calculated = calculate_grams_per_serving(serving_size, serving_unit);
+            updates.push(format!("grams_per_serving = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(calculated));
+        }
+
+        // ml_per_serving
+        if let Some(mps) = data.ml_per_serving {
+            updates.push(format!("ml_per_serving = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(mps));
+        } else if serving_changed {
+            let calculated = calculate_ml_per_serving(serving_size, serving_unit);
+            updates.push(format!("ml_per_serving = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(calculated));
+        }
+
         if updates.is_empty() {
-            return Self::get_by_id(conn, id);
+            return Ok(Some(current));
         }
 
         // Add updated_at
-        updates.push(format!("updated_at = datetime('now')"));
+        updates.push("updated_at = datetime('now')".to_string());
 
         let sql = format!(
             "UPDATE food_items SET {} WHERE id = ?{}",

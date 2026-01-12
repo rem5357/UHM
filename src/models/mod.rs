@@ -31,6 +31,7 @@ pub use recipe_component::{
 pub use recipe_ingredient::{
     RecipeIngredient, RecipeIngredientCreate, RecipeIngredientDetail,
     RecipeIngredientUpdate, recalculate_recipe_nutrition,
+    cascade_recalculate_from_food_item, CascadeRecalculateResult,
 };
 pub use vital::{
     Vital, VitalCreate, VitalGroup, VitalGroupCreate, VitalType, VitalUpdate,

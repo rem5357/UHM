@@ -650,6 +650,7 @@ impl UhmService {
             fiber: p.fiber, sodium: p.sodium, sugar: p.sugar, saturated_fat: p.saturated_fat,
             cholesterol: p.cholesterol, preference: p.preference.as_deref().map(Preference::from_str).unwrap_or_default(),
             notes: p.notes,
+            base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
         };
         let result = food_items::add_food_item(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -688,6 +689,7 @@ impl UhmService {
             calories: p.calories, protein: p.protein, carbs: p.carbs, fat: p.fat,
             fiber: p.fiber, sodium: p.sodium, sugar: p.sugar, saturated_fat: p.saturated_fat,
             cholesterol: p.cholesterol, preference: p.preference.map(|s| Preference::from_str(&s)), notes: p.notes,
+            base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
         };
         let result = food_items::update_food_item(&self.database, p.id, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;

@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -48,6 +48,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 4 {
         migrate_v4(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (4)", [])?;
+    }
+
+    if current_version < 5 {
+        migrate_v5(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
     }
 
     Ok(())
@@ -376,6 +381,87 @@ fn migrate_v4(conn: &Connection) -> DbResult<()> {
         CREATE INDEX idx_vitals_group ON vitals(group_id);
         "#,
     )?;
+
+    Ok(())
+}
+
+/// Migration v5: Unit conversion support for food items
+fn migrate_v5(conn: &Connection) -> DbResult<()> {
+    // Add new columns for unit conversion
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- UNIT CONVERSION SUPPORT
+        -- Add fields for standardized unit handling
+        -- ============================================
+
+        -- Base unit type: weight (g), volume (ml), or count (each)
+        ALTER TABLE food_items ADD COLUMN base_unit_type TEXT
+            CHECK(base_unit_type IN ('weight', 'volume', 'count'));
+
+        -- Grams per serving (for weight-based and count items with known weight)
+        ALTER TABLE food_items ADD COLUMN grams_per_serving REAL;
+
+        -- Milliliters per serving (for volume-based items)
+        ALTER TABLE food_items ADD COLUMN ml_per_serving REAL;
+
+        -- ============================================
+        -- FOOD ITEM CONVERSIONS
+        -- Custom unit conversions per food item
+        -- (e.g., "scoop" = 31g for protein powder)
+        -- ============================================
+        CREATE TABLE food_item_conversions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            food_item_id INTEGER NOT NULL REFERENCES food_items(id) ON DELETE CASCADE,
+            from_unit TEXT NOT NULL,           -- 'scoop', 'slice', 'piece', etc.
+            to_grams REAL,                     -- how many grams this equals
+            to_ml REAL,                        -- how many ml this equals
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(food_item_id, from_unit)
+        );
+
+        CREATE INDEX idx_food_conversions_food ON food_item_conversions(food_item_id);
+        "#,
+    )?;
+
+    // Migrate existing food items to populate new fields
+    migrate_existing_food_items(conn)?;
+
+    Ok(())
+}
+
+/// Migrate existing food items to populate base_unit_type, grams_per_serving, ml_per_serving
+fn migrate_existing_food_items(conn: &Connection) -> DbResult<()> {
+    use crate::nutrition::{
+        calculate_grams_per_serving, calculate_ml_per_serving, infer_base_unit_type,
+    };
+
+    // Fetch all existing food items
+    let mut stmt = conn.prepare("SELECT id, serving_size, serving_unit FROM food_items")?;
+    let items: Vec<(i64, f64, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Update each food item with inferred values
+    let mut update_stmt = conn.prepare(
+        "UPDATE food_items SET base_unit_type = ?1, grams_per_serving = ?2, ml_per_serving = ?3 WHERE id = ?4"
+    )?;
+
+    for (id, serving_size, serving_unit) in items {
+        let base_type = infer_base_unit_type(&serving_unit);
+        let grams = calculate_grams_per_serving(serving_size, &serving_unit);
+        let ml = calculate_ml_per_serving(serving_size, &serving_unit);
+
+        update_stmt.execute(rusqlite::params![
+            base_type.to_db_str(),
+            grams,
+            ml,
+            id
+        ])?;
+    }
 
     Ok(())
 }

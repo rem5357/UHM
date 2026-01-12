@@ -22,6 +22,38 @@ To log a meal, you need:
 2. **Recipes** (optional) - Collections of food items
 3. **Meal Entry** - The actual logged consumption attached to a day
 
+## Unit Management Module (UMM)
+
+UHM includes a smart unit conversion system that handles various unit formats:
+
+### Supported Unit Types
+
+**Weight units:** g, oz, lb, kg
+**Volume units:** tbsp, tsp, cup, ml, fl oz
+**Count units:** each, piece, slice, serving
+
+### Compound Units
+
+Food items can use compound units that include gram weight:
+- `"tbsp (20g)"` - 1 tablespoon = 20 grams
+- `"cup (240g)"` - 1 cup = 240 grams
+- `"scoop (30g)"` - 1 scoop = 30 grams
+
+The system automatically parses these and uses the gram weight for accurate calculations.
+
+### How Unit Conversion Works
+
+When you add a recipe ingredient with different units than the food item:
+1. **Same units** - Direct ratio calculation (e.g., 200g of a 100g serving = 2x nutrition)
+2. **Compound units** - Uses embedded gram weight (e.g., 4 tbsp of "tbsp (20g)" = 80g)
+3. **Standard conversions** - Built-in conversions (tbsp=14.8ml, oz=28.3g, etc.)
+4. **Serving keyword** - `unit: "serving"` always means number of servings
+
+**Example:**
+- Food item: Butter, serving_size=1, serving_unit="tbsp (14g)", 100 calories
+- Recipe ingredient: quantity=2, unit="tbsp"
+- Calculation: 2 tbsp / 1 tbsp = 2 servings = 200 calories
+
 ## Step-by-Step Workflow
 
 ### Step 1: Check for Existing Food Items
@@ -53,9 +85,17 @@ add_food_item(
 ```
 
 **Tips:**
-- Use consistent units (g for weight, ml for liquids)
 - Nutrition values are PER SERVING
+- Use compound units for volume-based items: `serving_unit: "tbsp (20g)"`
+- The system auto-calculates `grams_per_serving` and `ml_per_serving`
 - You can add preference: "liked", "disliked", or "neutral"
+
+**Serving Unit Examples:**
+- `"g"` - weight in grams (most accurate)
+- `"oz"` - weight in ounces
+- `"tbsp (20g)"` - tablespoon with gram weight (recommended for spreads, sauces)
+- `"cup (240g)"` - cup with gram weight
+- `"each"` or `"piece"` - count-based (eggs, slices)
 
 ### Step 3: Create a Recipe (for multi-ingredient meals)
 
@@ -87,6 +127,7 @@ add_recipe_ingredient(
 - Quantity is for the ENTIRE recipe, not per serving
 - Nutrition is automatically calculated and cached
 - Each food item can only be added once per recipe (use update to change quantity)
+- Units are intelligently converted (see Unit Management section above)
 
 ### Step 4b: Add Component Recipes (optional)
 
@@ -114,9 +155,11 @@ add_recipe_component(
 - Use `unit: "serving"` when quantity represents number of servings (most common)
   - e.g., `quantity: 1.0, unit: "serving"` = 1 serving of the food item
   - e.g., `quantity: 0.5, unit: "serving"` = half a serving
-- Use matching units (g, ml, etc.) when specifying raw amounts
+- Use matching units (g, ml, tbsp, etc.) when specifying raw amounts
   - e.g., `quantity: 200, unit: "g"` with a food item that has `serving_size: 100, serving_unit: "g"`
   - This calculates: 200g / 100g per serving = 2 servings worth of nutrition
+- **Cross-unit conversion** - The system handles unit mismatches automatically
+  - e.g., `quantity: 8, unit: "tbsp"` with `serving_unit: "tbsp (20g)"` = 8 tbsp = 160g
 
 ### Step 5: Log the Meal
 
@@ -203,17 +246,38 @@ log_meal(date, "dinner", recipe_id: 5, servings: 1, percent_eaten: 75)
 update_meal_entry(id: 12, servings: 2)  // ate more than initially logged
 ```
 
-## Updating Food Items
+## Updating Food Items (Cascading Recalculation)
 
 Food items can be updated at any time, even when used in recipes:
 ```
 update_food_item(id: 5, calories: 170, protein: 32)
 ```
 
-When you update a food item:
-- All recipes using that item automatically have their nutrition recalculated
-- The response includes `recipes_updated` showing which recipe IDs were affected
-- This is useful for correcting nutritional data you entered incorrectly
+When you update a food item, **cascading recalculation** automatically updates all affected data:
+
+1. **Direct recipes** - All recipes using this food item as an ingredient
+2. **Parent recipes** - All recipes using affected recipes as components (recursive)
+3. **Meal entries** - All logged meals using affected recipes
+4. **Daily totals** - All days containing affected meal entries
+
+**Response includes:**
+- `recipes_recalculated` - Number of recipes that were updated
+- `days_recalculated` - Number of days that were updated
+
+**Example response:**
+```json
+{
+  "success": true,
+  "updated_at": "2026-01-12T10:30:00",
+  "recipes_recalculated": 5,
+  "days_recalculated": 12
+}
+```
+
+This feature is particularly useful for:
+- Correcting nutritional data you entered incorrectly
+- Updating serving sizes or units
+- All historical data automatically reflects corrections
 
 ## Notes
 

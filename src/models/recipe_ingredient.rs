@@ -202,6 +202,8 @@ impl RecipeIngredient {
 
 /// Calculate total nutrition for a recipe based on its ingredients and component recipes
 pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult<Nutrition> {
+    use crate::nutrition::calculate_nutrition_multiplier;
+
     let recipe = Recipe::get_by_id(conn, recipe_id)?
         .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
@@ -213,12 +215,14 @@ pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult
         let food_item = FoodItem::get_by_id(conn, ingredient.food_item_id)?
             .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
-        // Calculate multiplier based on ingredient unit type
-        let multiplier = calculate_multiplier(
+        // Calculate multiplier using the new unit conversion system
+        let multiplier = calculate_nutrition_multiplier(
             ingredient.quantity,
             &ingredient.unit,
             food_item.serving_size,
             &food_item.serving_unit,
+            food_item.grams_per_serving,
+            food_item.ml_per_serving,
         );
 
         total = total + food_item.nutrition.scale(multiplier);
@@ -242,34 +246,183 @@ pub fn calculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult
     Ok(per_serving)
 }
 
-/// Calculate the nutrition multiplier based on ingredient quantity and units
-fn calculate_multiplier(
-    quantity: f64,
-    ingredient_unit: &str,
-    serving_size: f64,
-    serving_unit: &str,
-) -> f64 {
-    let unit_lower = ingredient_unit.to_lowercase();
-
-    // If ingredient is specified in "servings", quantity IS the multiplier
-    if unit_lower == "serving" || unit_lower == "servings" {
-        return quantity;
-    }
-
-    // If units match, divide quantity by serving_size to get multiplier
-    // e.g., 200g ingredient / 100g serving_size = 2.0 servings
-    if unit_lower == serving_unit.to_lowercase() {
-        return quantity / serving_size;
-    }
-
-    // For mismatched units, assume quantity represents servings
-    // (user should use matching units for accuracy)
-    quantity
-}
-
 /// Recalculate and update cached nutrition for a recipe
 pub fn recalculate_recipe_nutrition(conn: &Connection, recipe_id: i64) -> DbResult<Nutrition> {
     let nutrition = calculate_recipe_nutrition(conn, recipe_id)?;
     Recipe::update_cached_nutrition(conn, recipe_id, &nutrition)?;
     Ok(nutrition)
+}
+
+/// Result of cascading recalculation
+#[derive(Debug, Clone, Default)]
+pub struct CascadeRecalculateResult {
+    pub recipes_recalculated: i64,
+    pub days_recalculated: i64,
+}
+
+/// Cascading recalculation: when a food item changes, recalculate all affected recipes and days
+pub fn cascade_recalculate_from_food_item(
+    conn: &Connection,
+    food_item_id: i64,
+) -> DbResult<CascadeRecalculateResult> {
+    use std::collections::HashSet;
+    use super::recipe_component::RecipeComponent;
+
+    let mut result = CascadeRecalculateResult::default();
+
+    // Step 1: Find all recipes directly using this food item
+    let direct_recipe_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT recipe_id FROM recipe_ingredients WHERE food_item_id = ?1",
+        )?;
+        let rows = stmt.query_map([food_item_id], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    if direct_recipe_ids.is_empty() {
+        return Ok(result);
+    }
+
+    // Step 2: Collect all recipes affected (including parent recipes that use affected recipes as components)
+    let mut all_affected: HashSet<i64> = HashSet::new();
+    let mut to_process: Vec<i64> = direct_recipe_ids;
+
+    while let Some(recipe_id) = to_process.pop() {
+        if all_affected.insert(recipe_id) {
+            // Find parent recipes that use this recipe as a component
+            let parent_ids: Vec<i64> = {
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT recipe_id FROM recipe_components WHERE component_recipe_id = ?1",
+                )?;
+                let rows = stmt.query_map([recipe_id], |row| row.get(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            to_process.extend(parent_ids);
+        }
+    }
+
+    // Step 3: Sort recipes by dependency order (leaf recipes first, then parents)
+    // We need to recalculate in order so parent recipes get updated child values
+    let sorted_recipes = topological_sort_recipes(conn, &all_affected)?;
+
+    // Step 4: Recalculate all affected recipes
+    for recipe_id in &sorted_recipes {
+        recalculate_recipe_nutrition(conn, *recipe_id)?;
+        result.recipes_recalculated += 1;
+    }
+
+    // Step 5: Find all days with meal entries using affected recipes or the food item directly
+    let affected_day_ids: Vec<i64> = {
+        let recipe_ids_str = sorted_recipes
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let sql = format!(
+            "SELECT DISTINCT day_id FROM meal_entries WHERE recipe_id IN ({}) OR food_item_id = ?1",
+            if recipe_ids_str.is_empty() {
+                "-1".to_string() // No recipes, just check food_item_id
+            } else {
+                recipe_ids_str
+            }
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([food_item_id], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    // Step 6: Recalculate all affected days
+    use super::meal_entry::recalculate_day_nutrition;
+    for day_id in affected_day_ids {
+        recalculate_day_nutrition(conn, day_id)?;
+        result.days_recalculated += 1;
+    }
+
+    Ok(result)
+}
+
+/// Sort recipes in topological order (dependencies first)
+fn topological_sort_recipes(
+    conn: &Connection,
+    recipe_ids: &std::collections::HashSet<i64>,
+) -> DbResult<Vec<i64>> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    if recipe_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Build dependency graph: recipe_id -> set of component recipe IDs it depends on
+    let mut dependencies: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut dependents: HashMap<i64, HashSet<i64>> = HashMap::new();
+
+    for &recipe_id in recipe_ids {
+        dependencies.entry(recipe_id).or_default();
+        dependents.entry(recipe_id).or_default();
+    }
+
+    // Query component relationships
+    let ids_str = recipe_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "SELECT recipe_id, component_recipe_id FROM recipe_components
+         WHERE recipe_id IN ({}) AND component_recipe_id IN ({})",
+        ids_str, ids_str
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let edges: Vec<(i64, i64)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (parent_id, child_id) in edges {
+        dependencies.entry(parent_id).or_default().insert(child_id);
+        dependents.entry(child_id).or_default().insert(parent_id);
+    }
+
+    // Kahn's algorithm for topological sort
+    let mut result = Vec::new();
+    let mut queue: VecDeque<i64> = VecDeque::new();
+
+    // Start with recipes that have no dependencies (within our set)
+    for &recipe_id in recipe_ids {
+        if dependencies.get(&recipe_id).map_or(true, |d| d.is_empty()) {
+            queue.push_back(recipe_id);
+        }
+    }
+
+    while let Some(recipe_id) = queue.pop_front() {
+        result.push(recipe_id);
+
+        // Remove this recipe from dependents' dependency lists
+        if let Some(parents) = dependents.get(&recipe_id).cloned() {
+            for parent_id in parents {
+                if let Some(deps) = dependencies.get_mut(&parent_id) {
+                    deps.remove(&recipe_id);
+                    if deps.is_empty() {
+                        queue.push_back(parent_id);
+                    }
+                }
+            }
+        }
+    }
+
+    // If we didn't process all recipes, there's a cycle (shouldn't happen with proper constraints)
+    if result.len() != recipe_ids.len() {
+        // Fall back to arbitrary order - collect missing IDs first to avoid borrow conflict
+        let missing: Vec<i64> = recipe_ids
+            .iter()
+            .copied()
+            .filter(|id| !result.contains(id))
+            .collect();
+        result.extend(missing);
+    }
+
+    Ok(result)
 }
