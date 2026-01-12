@@ -229,6 +229,237 @@ When you update a food item:
   - Not used as a component in any other recipe
 "#;
 
+/// Medication management instructions for AI assistants
+pub const MEDICATION_INSTRUCTIONS: &str = r#"
+# UHM Medication Management Instructions
+
+This guide explains how to manage medications using the Universal Health Manager (UHM) tools.
+
+## Overview
+
+The medication system tracks:
+- **Prescriptions** - Rx medications from doctors
+- **Supplements** - Vitamins, minerals, etc.
+- **OTC** - Over-the-counter medications
+- **Natural remedies** - Herbal, homeopathic
+- **Compounds** - Compounded medications
+- **Medical devices** - Inhalers, insulin pens, etc.
+- **Other** - Anything else
+
+## Key Concepts
+
+### Active vs Deprecated Medications
+- Medications have an `is_active` flag
+- **Active** = currently taking
+- **Deprecated** = no longer taking (but preserved for history)
+- **Deprecate, don't delete** - preserves medication history
+
+### Force Flag Requirement
+- `update_medication` and `delete_medication` require `force=true`
+- This prevents accidental modifications
+- For dosage changes: **deprecate old + add new** (recommended)
+
+## Step-by-Step Workflows
+
+### Adding a New Prescription
+
+```
+add_medication(
+  name: "Lisinopril",
+  med_type: "prescription",
+  dosage_amount: 10,
+  dosage_unit: "mg",
+  instructions: "Take 1 tablet daily in the morning",
+  frequency: "once daily",
+  prescribing_doctor: "Dr. Smith",
+  prescribed_date: "2026-01-10",
+  pharmacy: "CVS Pharmacy",
+  rx_number: "RX12345678",
+  refills_remaining: 5,
+  start_date: "2026-01-10",
+  notes: "For blood pressure management"
+)
+```
+
+### Adding a Supplement
+
+```
+add_medication(
+  name: "Vitamin D3",
+  med_type: "supplement",
+  dosage_amount: 5000,
+  dosage_unit: "iu",
+  instructions: "Take 1 capsule with food",
+  frequency: "once daily",
+  start_date: "2026-01-01"
+)
+```
+
+### Adding an OTC Medication
+
+```
+add_medication(
+  name: "Ibuprofen",
+  med_type: "otc",
+  dosage_amount: 200,
+  dosage_unit: "mg",
+  instructions: "Take 1-2 tablets as needed for pain",
+  frequency: "PRN",
+  notes: "Max 6 tablets per day"
+)
+```
+
+### Changing a Dosage (Recommended Approach)
+
+When a doctor changes your dosage, preserve history by:
+
+1. **Deprecate the old medication:**
+```
+deprecate_medication(
+  id: 5,
+  end_date: "2026-01-15",
+  reason: "Dosage increased by Dr. Smith"
+)
+```
+
+2. **Add the new dosage:**
+```
+add_medication(
+  name: "Lisinopril",
+  med_type: "prescription",
+  dosage_amount: 20,  // new dosage
+  dosage_unit: "mg",
+  instructions: "Take 1 tablet daily in the morning",
+  frequency: "once daily",
+  prescribing_doctor: "Dr. Smith",
+  prescribed_date: "2026-01-15",
+  pharmacy: "CVS Pharmacy",
+  rx_number: "RX12345679",
+  refills_remaining: 5,
+  start_date: "2026-01-15",
+  notes: "Increased from 10mg"
+)
+```
+
+### Stopping a Medication
+
+```
+deprecate_medication(
+  id: 3,
+  end_date: "2026-01-20",
+  reason: "Completed course of treatment"
+)
+```
+
+### Restarting a Medication
+
+```
+reactivate_medication(id: 3)
+```
+
+### Generating a Medication List
+
+```
+export_medications_markdown(patient_name: "John Smith")
+```
+
+Returns a formatted markdown document with:
+- Patient name and current date/time
+- Medications grouped by type (prescriptions first)
+- Full details: dosage, frequency, doctor, pharmacy, instructions
+
+## Quick Reference
+
+| Task | Tool |
+|------|------|
+| Add medication | `add_medication` |
+| View medication details | `get_medication` |
+| List active medications | `list_medications` |
+| Search by name | `search_medications` |
+| Stop taking (preserve history) | `deprecate_medication` |
+| Restart taking | `reactivate_medication` |
+| Update (requires force) | `update_medication` |
+| Delete (requires force) | `delete_medication` |
+| Generate med list doc | `export_medications_markdown` |
+
+## Medication Types
+
+| Type | Use For |
+|------|---------|
+| `prescription` | Doctor-prescribed Rx medications |
+| `supplement` | Vitamins, minerals, fish oil, probiotics |
+| `otc` | Over-the-counter (Tylenol, Advil, Benadryl) |
+| `natural` | Herbal remedies, homeopathic |
+| `compound` | Compounded medications from specialty pharmacy |
+| `medical_device` | Inhalers, insulin pens, nebulizers |
+| `other` | Anything else |
+
+## Dosage Units
+
+| Unit | Common Use |
+|------|------------|
+| `mg` | Most tablets/capsules |
+| `mcg` | Thyroid meds, some vitamins |
+| `g` | Large doses, powders |
+| `ml` | Liquids |
+| `fl_oz` | Liquid medications |
+| `tablet` | Whole tablets |
+| `capsule` | Capsules |
+| `pill` | Generic pill form |
+| `spray` | Nasal sprays |
+| `puff` | Inhalers |
+| `drop` | Eye/ear drops |
+| `patch` | Transdermal patches |
+| `injection` | Injectable medications |
+| `iu` | International units (vitamins) |
+| `unit` | Insulin units |
+
+## Frequency Examples
+
+- `once daily` - Take once per day
+- `twice daily` - Take twice per day
+- `three times daily` - Take three times per day
+- `every 8 hours` - Take every 8 hours
+- `weekly` - Take once per week
+- `PRN` - As needed
+- `at bedtime` - Take before sleep
+- `with meals` - Take with food
+
+## Best Practices
+
+1. **Always include instructions** - Helps remember how to take
+2. **Record prescribing doctor** - For prescriptions
+3. **Track refills** - Know when to request refill
+4. **Use start_date** - Know how long you've been taking it
+5. **Deprecate, don't delete** - Preserve medication history
+6. **New dosage = new entry** - Deprecate old, add new
+
+## Listing Medications
+
+**Active only (default):**
+```
+list_medications()
+```
+
+**All medications including inactive:**
+```
+list_medications(active_only: false)
+```
+
+**Filter by type:**
+```
+list_medications(med_type: "prescription")
+list_medications(med_type: "supplement")
+```
+
+## Notes
+
+- Dates use ISO format: YYYY-MM-DD
+- `export_medications_markdown` only includes active medications
+- Deprecated medications are hidden by default but preserved
+- The force flag protects against accidental changes
+"#;
+
 /// Runtime status of the UHM service
 #[derive(Debug, Clone, Serialize)]
 pub struct UhmStatus {
