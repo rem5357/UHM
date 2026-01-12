@@ -290,13 +290,30 @@ impl FoodItem {
     }
 
     /// Get the count of recipes using this food item
-    pub fn get_usage_count(conn: &Connection, id: i64) -> DbResult<i64> {
+    pub fn get_recipe_usage_count(conn: &Connection, id: i64) -> DbResult<i64> {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM recipe_ingredients WHERE food_item_id = ?1",
             [id],
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Get the count of meal entries directly using this food item
+    pub fn get_meal_usage_count(conn: &Connection, id: i64) -> DbResult<i64> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM meal_entries WHERE food_item_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Get total usage count (recipes + direct meal entries)
+    pub fn get_usage_count(conn: &Connection, id: i64) -> DbResult<i64> {
+        let recipe_count = Self::get_recipe_usage_count(conn, id)?;
+        let meal_count = Self::get_meal_usage_count(conn, id)?;
+        Ok(recipe_count + meal_count)
     }
 
     /// Get recipe names that use this food item
@@ -315,6 +332,24 @@ impl FoodItem {
             .collect::<Result<Vec<String>, _>>()?;
 
         Ok(names)
+    }
+
+    /// Get dates where this food item was logged directly as a meal
+    pub fn get_used_in_meals(conn: &Connection, id: i64) -> DbResult<Vec<String>> {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT DISTINCT d.date FROM days d
+            INNER JOIN meal_entries me ON d.id = me.day_id
+            WHERE me.food_item_id = ?1
+            ORDER BY d.date DESC
+            "#
+        )?;
+
+        let dates = stmt
+            .query_map([id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(dates)
     }
 
     /// Get recipe IDs that use this food item (for recalculation)

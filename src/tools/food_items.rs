@@ -70,12 +70,20 @@ pub struct FoodItemDetail {
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub usage_count: i64,
+    pub recipe_usage_count: i64,
+    pub meal_usage_count: i64,
     pub used_in_recipes: Vec<String>,
+    pub used_in_meal_dates: Vec<String>,
 }
 
 impl FoodItemDetail {
-    pub fn from_food_item(item: FoodItem, usage_count: i64, used_in_recipes: Vec<String>) -> Self {
+    pub fn from_food_item(
+        item: FoodItem,
+        recipe_usage_count: i64,
+        meal_usage_count: i64,
+        used_in_recipes: Vec<String>,
+        used_in_meal_dates: Vec<String>,
+    ) -> Self {
         Self {
             id: item.id,
             name: item.name,
@@ -95,8 +103,10 @@ impl FoodItemDetail {
             notes: item.notes,
             created_at: item.created_at,
             updated_at: item.updated_at,
-            usage_count,
+            recipe_usage_count,
+            meal_usage_count,
             used_in_recipes,
+            used_in_meal_dates,
         }
     }
 }
@@ -139,8 +149,10 @@ pub struct ListUnusedFoodItemsResponse {
 #[derive(Debug, Serialize)]
 pub struct DeleteFoodItemBlockedResponse {
     pub error: String,
-    pub usage_count: i64,
+    pub recipe_usage_count: i64,
+    pub meal_usage_count: i64,
     pub used_in_recipes: Vec<String>,
+    pub used_in_meal_dates: Vec<String>,
 }
 
 /// Response for successful delete_food_item
@@ -220,12 +232,22 @@ pub fn get_food_item(db: &Database, id: i64) -> Result<Option<FoodItemDetail>, S
 
     match item {
         Some(item) => {
-            let usage_count = FoodItem::get_usage_count(&conn, id)
-                .map_err(|e| format!("Failed to get usage count: {}", e))?;
+            let recipe_usage_count = FoodItem::get_recipe_usage_count(&conn, id)
+                .map_err(|e| format!("Failed to get recipe usage count: {}", e))?;
+            let meal_usage_count = FoodItem::get_meal_usage_count(&conn, id)
+                .map_err(|e| format!("Failed to get meal usage count: {}", e))?;
             let used_in_recipes = FoodItem::get_used_in_recipes(&conn, id)
                 .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
+            let used_in_meal_dates = FoodItem::get_used_in_meals(&conn, id)
+                .map_err(|e| format!("Failed to get meal usage: {}", e))?;
 
-            Ok(Some(FoodItemDetail::from_food_item(item, usage_count, used_in_recipes)))
+            Ok(Some(FoodItemDetail::from_food_item(
+                item,
+                recipe_usage_count,
+                meal_usage_count,
+                used_in_recipes,
+                used_in_meal_dates,
+            )))
         }
         None => Ok(None),
     }
@@ -298,18 +320,21 @@ pub fn update_food_item(
     }
 }
 
-/// List food items with zero uses (not used in any recipe)
+/// List food items with zero uses (not used in any recipe or meal entry)
 /// These food items are safe to delete
 pub fn list_unused_food_items(db: &Database) -> Result<ListUnusedFoodItemsResponse, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
-    // Find food items that are not used in any recipe_ingredients
+    // Find food items that are not used in any recipe_ingredients AND not used in any meal_entries
     let mut stmt = conn.prepare(
         r#"
         SELECT f.id, f.name, f.brand, f.preference, f.created_at
         FROM food_items f
         WHERE NOT EXISTS (
             SELECT 1 FROM recipe_ingredients ri WHERE ri.food_item_id = f.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM meal_entries me WHERE me.food_item_id = f.id
         )
         ORDER BY f.name ASC
         "#
@@ -334,7 +359,7 @@ pub fn list_unused_food_items(db: &Database) -> Result<ListUnusedFoodItemsRespon
     Ok(ListUnusedFoodItemsResponse { items, count })
 }
 
-/// Delete a food item (blocked if used in any recipe)
+/// Delete a food item (blocked if used in any recipe or meal entry)
 pub fn delete_food_item(
     db: &Database,
     id: i64,
@@ -349,17 +374,33 @@ pub fn delete_food_item(
     }
 
     // Check if used in any recipes
-    let usage_count = FoodItem::get_usage_count(&conn, id)
-        .map_err(|e| format!("Failed to check usage: {}", e))?;
+    let recipe_usage_count = FoodItem::get_recipe_usage_count(&conn, id)
+        .map_err(|e| format!("Failed to check recipe usage: {}", e))?;
 
-    if usage_count > 0 {
+    // Check if used in any meal entries directly
+    let meal_usage_count = FoodItem::get_meal_usage_count(&conn, id)
+        .map_err(|e| format!("Failed to check meal usage: {}", e))?;
+
+    if recipe_usage_count > 0 || meal_usage_count > 0 {
         let used_in_recipes = FoodItem::get_used_in_recipes(&conn, id)
             .map_err(|e| format!("Failed to get recipe usage: {}", e))?;
+        let used_in_meal_dates = FoodItem::get_used_in_meals(&conn, id)
+            .map_err(|e| format!("Failed to get meal usage: {}", e))?;
+
+        let mut reasons = Vec::new();
+        if recipe_usage_count > 0 {
+            reasons.push(format!("used in {} recipe(s)", recipe_usage_count));
+        }
+        if meal_usage_count > 0 {
+            reasons.push(format!("logged in {} meal(s)", meal_usage_count));
+        }
 
         return Ok(Err(DeleteFoodItemBlockedResponse {
-            error: format!("Cannot delete food item: used in {} recipe(s)", usage_count),
-            usage_count,
+            error: format!("Cannot delete food item: {}", reasons.join(", ")),
+            recipe_usage_count,
+            meal_usage_count,
             used_in_recipes,
+            used_in_meal_dates,
         }));
     }
 
