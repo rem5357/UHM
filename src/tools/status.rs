@@ -18,15 +18,15 @@ This guide explains how to log meals using the Universal Health Manager (UHM) to
 ## Overview
 
 To log a meal, you need:
-1. **Food Items** - Base ingredients with nutritional data
-2. **Recipes** (optional) - Collections of food items
+1. **Food Items** - Base ingredients with nutritional data (stored per 100g/100ml/count)
+2. **Recipes** (optional) - Collections of food items with quantities in grams/ml
 3. **Meal Entry** - The actual logged consumption attached to a day
 
-## MANDATORY Unit Standards (READ FIRST)
+---
+
+## MANDATORY Unit Standards for Food Items
 
 ALL food items MUST use one of these three standardized formats:
-
-### The Three Standard Formats
 
 | Category | serving_size | serving_unit | Nutrition stored as |
 |----------|--------------|--------------|---------------------|
@@ -46,12 +46,10 @@ ALL food items MUST use one of these three standardized formats:
 2. **Is it a solid/semi-solid?** (meat, cheese, vegetables, rice, powders, spreads)
    → `serving_size: 100, serving_unit: "g"`
    → Nutrition = per 100 grams
-   → Convert package nutrition to per-100g values
 
 3. **Is it a liquid?** (milk, juice, oil, broth, sauces)
    → `serving_size: 100, serving_unit: "ml"`
    → Nutrition = per 100 milliliters
-   → Convert package nutrition to per-100ml values
 
 ### Converting Package Nutrition to Standard Format
 
@@ -64,161 +62,170 @@ Most packages show nutrition "per serving" (e.g., "per 2 tbsp (32g)"). Convert t
 - Convert: (190 / 32) * 100 = 594 calories per 100g
 - Store as: `serving_size: 100, serving_unit: "g", calories: 594`
 
-**Example - Orange Juice:**
-- Package says: 110 cal per 240ml
+**Example - Oat Milk:**
+- Package says: 110 cal per 1 cup (240ml)
 - Convert: (110 / 240) * 100 = 46 calories per 100ml
 - Store as: `serving_size: 100, serving_unit: "ml", calories: 46`
 
-### NEVER Use These Units
+### NEVER Use These Units in Food Items
 
-- "handful" → Convert to grams, store per 100g
-- "portion" → Convert to grams or count
-- "serving" → Be specific (100g, 100ml, or count)
-- "piece" → Use "count" instead
-- "each" → Use "count" instead
-- "tbsp", "cup", "scoop" → Convert to grams, store per 100g
-- "small/medium/large" → Convert to grams, store per 100g
+- "handful", "portion", "serving"
+- "piece", "each", "item" (use "count" instead)
+- "tbsp", "cup", "scoop" (convert to grams, store per 100g)
+- "small/medium/large" (put descriptor in name, use "count")
 
 ### Examples by Food Type
 
-| Food Type | serving_size | serving_unit | Nutrition is per... |
-|-----------|--------------|--------------|---------------------|
-| Chicken breast | 100 | g | 100g of chicken |
-| Rice (cooked) | 100 | g | 100g of rice |
-| Peanut butter | 100 | g | 100g of peanut butter |
-| Olive oil | 100 | ml | 100ml of oil |
-| Milk | 100 | ml | 100ml of milk |
-| Orange juice | 100 | ml | 100ml of juice |
-| Eggs | 1 | count | 1 egg (~50g) |
-| Sushi (nigiri) | 1 | count | 1 piece |
-| Cookies | 1 | count | 1 cookie |
-| Apple | 1 | count | 1 medium apple (~180g) |
-| Protein powder | 100 | g | 100g (not per scoop) |
-| Freeze-dried fruit | 100 | g | 100g (not per handful) |
+| Food Type | serving_size | serving_unit | Name Convention |
+|-----------|--------------|--------------|-----------------|
+| Chicken breast | 100 | g | "Chicken Breast (grilled)" |
+| Rice (cooked) | 100 | g | "Jasmine Rice (cooked)" |
+| Protein powder | 100 | g | "ON Whey - Vanilla" |
+| Olive oil | 100 | ml | "Extra Virgin Olive Oil" |
+| Oat milk | 100 | ml | "Oat Milk Barista" |
+| Eggs | 1 | count | "Egg (large)" |
+| Banana | 1 | count | "Banana (medium)" |
+| Sushi | 1 | count | "Salmon Nigiri" |
 
-### Restaurant/Prepared Foods
+---
 
-- **Individual pieces** (sushi, dumplings, wings): `serving_size: 1, serving_unit: "count"`
-- **Whole items** (burrito, sandwich, burger): `serving_size: 1, serving_unit: "count"`
-- **By weight items** (salad bar, deli meat): `serving_size: 100, serving_unit: "g"`
+## CRITICAL: Recipe Ingredient Units
 
-**Example - Salmon Nigiri Sushi:**
+**This is where most errors occur.** The UHM system does NOT automatically convert volume measurements (cups, tbsp, scoops) to grams. **Claude must perform this conversion manually when adding recipe ingredients.**
+
+### The Golden Rule
+
+**Recipe ingredients must use grams (g) or milliliters (ml) to match the food item's base unit.**
+
+When a user says "add 4 cups of oats", Claude must:
+1. Know that 1 cup rolled oats ≈ 80g
+2. Calculate: 4 cups × 80g = 320g
+3. Store the ingredient as: `quantity: 320, unit: "g"`
+
+### Common Conversion Reference
+
+Claude should know (or look up) these conversions:
+
+#### Dry Goods
+| Item | 1 cup = | 1 tbsp = | 1 tsp = |
+|------|---------|----------|---------|
+| Rolled oats | 80g | 5g | 1.7g |
+| Flour | 120g | 7.5g | 2.5g |
+| Sugar | 200g | 12.5g | 4.2g |
+| Protein powder (whey) | 93g (≈3 scoops) | 6g | 2g |
+| Chia seeds | 160g | 10g | 3.3g |
+| Ground flaxseed | 130g | 8g | 2.7g |
+| PBfit/peanut powder | 64g | 8g | 2.7g |
+| Cocoa powder | 85g | 5.3g | 1.8g |
+| Freeze-dried fruit | 15-20g | 3g | 1g |
+| Monk fruit sweetener | 192g | 12g | 4g |
+
+#### Liquids
+| Item | 1 cup = | 1 tbsp = | 1 tsp = |
+|------|---------|----------|---------|
+| Water/milk/juice | 240ml | 15ml | 5ml |
+| Oil | 240ml | 15ml | 5ml |
+| Honey/syrup | 340g | 21g | 7g |
+
+#### Protein Powder Scoops
+| Brand | 1 scoop = |
+|-------|-----------|
+| ON Gold Standard | 31g |
+| Naked Whey ISO | 16g (their "2 scoops" serving = 32g) |
+| Generic whey | ~30g |
+
+### Recipe Ingredient Workflow
+
+**WRONG approach:**
 ```
-add_food_item(
-  name: "Salmon Nigiri",
-  serving_size: 1,
-  serving_unit: "count",
-  calories: 40,      // per 1 piece
-  protein: 2.5,
-  ...
+add_recipe_ingredient(
+  recipe_id: 1,
+  food_item_id: 32,  // Rolled Oats (per 100g)
+  quantity: 4,
+  unit: "cup"        // ❌ System won't convert this properly!
 )
 ```
 
-**Example - Chicken Breast:**
+**CORRECT approach:**
 ```
-add_food_item(
-  name: "Chicken Breast (grilled)",
-  serving_size: 100,
-  serving_unit: "g",
-  calories: 165,     // per 100g
-  protein: 31,
-  ...
+add_recipe_ingredient(
+  recipe_id: 1,
+  food_item_id: 32,  // Rolled Oats (per 100g)
+  quantity: 320,     // 4 cups × 80g/cup = 320g
+  unit: "g",         // ✅ Matches food item's base unit
+  notes: "4 cups × 80g/cup"  // Document the conversion
 )
 ```
 
-### Logging Meals with Standard Units
+### How the System Calculates Nutrition
 
-When logging, specify the actual amount consumed:
-- "I ate 150g of chicken" → `log_meal(..., servings: 1.5)` (1.5 × 100g)
-- "I drank 250ml of milk" → `log_meal(..., servings: 2.5)` (2.5 × 100ml)
-- "I ate 3 pieces of sushi" → `log_meal(..., servings: 3)` (3 × 1 count)
+When the ingredient uses matching units (g for solids, ml for liquids):
 
-### Fixing Incorrect Units
+```
+nutrition_multiplier = ingredient_quantity / food_item_serving_size
+                     = 320g / 100g
+                     = 3.2
 
-If you encounter a food item with non-standard units:
-1. Look up the gram/ml weight
-2. Convert nutrition to per-100g or per-100ml
-3. Use `update_food_item` to fix it
+ingredient_calories = food_item_calories × nutrition_multiplier
+                    = 375 cal × 3.2
+                    = 1,200 cal
+```
 
-**Example:** Food item has "1 handful (30g)" with 50 calories
-- Convert: (50 / 30) * 100 = 167 calories per 100g
-- Fix: `update_food_item(id, serving_size: 100, serving_unit: "g", calories: 167)`
+### Best Practice: Document Conversions in Notes
 
-## Unit Conversion System
+Always include the original measurement in the notes field:
 
-UHM includes a smart unit conversion system that handles various unit formats:
+```
+add_recipe_ingredient(
+  recipe_id: 6,
+  food_item_id: 29,
+  quantity: 248,
+  unit: "g",
+  notes: "8 scoops × 31g/scoop"  // ✅ Future reference
+)
+```
 
-### Supported Unit Types
+This helps when:
+- Reviewing recipes later
+- Debugging calculation errors
+- Adjusting recipes (e.g., "I want to use 6 scoops instead")
 
-**Weight units:** g, oz, lb, kg
-**Volume units:** tbsp, tsp, cup, ml, fl oz
-**Count units:** count (standardized - always use "count")
-
-### Compound Units
-
-Food items can use compound units that include gram weight:
-- `"tbsp (20g)"` - 1 tablespoon = 20 grams
-- `"cup (240g)"` - 1 cup = 240 grams
-- `"scoop (30g)"` - 1 scoop = 30 grams
-
-The system automatically parses these and uses the gram weight for accurate calculations.
-
-### How Unit Conversion Works
-
-When you add a recipe ingredient with different units than the food item:
-1. **Same units** - Direct ratio calculation (e.g., 200g of a 100g serving = 2x nutrition)
-2. **Compound units** - Uses embedded gram weight (e.g., 4 tbsp of "tbsp (20g)" = 80g)
-3. **Standard conversions** - Built-in conversions (tbsp=14.8ml, oz=28.3g, etc.)
-4. **Serving keyword** - `unit: "serving"` always means number of servings
-
-**Example:**
-- Food item: Butter, serving_size=1, serving_unit="tbsp (14g)", 100 calories
-- Recipe ingredient: quantity=2, unit="tbsp"
-- Calculation: 2 tbsp / 1 tbsp = 2 servings = 200 calories
+---
 
 ## Step-by-Step Workflow
 
 ### Step 1: Check for Existing Food Items
 
-Before adding new food items, search for existing ones:
 ```
 search_food_items(query: "chicken breast")
 ```
 
 ### Step 2: Add Food Items (if needed)
 
-If the food item doesn't exist, create it following the MANDATORY standards:
-
 **For solids (per 100g):**
 ```
 add_food_item(
   name: "Chicken Breast (grilled)",
-  brand: null,
   serving_size: 100,
   serving_unit: "g",
-  calories: 165,     // per 100g
+  calories: 165,
   protein: 31,
   carbs: 0,
   fat: 3.6,
   fiber: 0,
   sodium: 74,
-  sugar: 0,
-  saturated_fat: 1,
-  cholesterol: 85
+  ...
 )
 ```
 
 **For liquids (per 100ml):**
 ```
 add_food_item(
-  name: "Whole Milk",
-  brand: null,
+  name: "Oat Milk Barista",
   serving_size: 100,
   serving_unit: "ml",
-  calories: 61,      // per 100ml
-  protein: 3.2,
-  carbs: 4.8,
-  fat: 3.3,
+  calories: 46,
+  protein: 0.8,
   ...
 )
 ```
@@ -226,128 +233,199 @@ add_food_item(
 **For countables (per 1 item):**
 ```
 add_food_item(
-  name: "Large Egg",
-  brand: null,
+  name: "Egg (large)",
   serving_size: 1,
   serving_unit: "count",
-  calories: 72,      // per 1 egg
+  calories: 72,
   protein: 6.3,
-  carbs: 0.4,
-  fat: 4.8,
   ...
 )
 ```
 
-**Tips:**
-- ALWAYS follow the MANDATORY Unit Standards section above
-- Solids: `serving_size: 100, serving_unit: "g"` (nutrition per 100g)
-- Liquids: `serving_size: 100, serving_unit: "ml"` (nutrition per 100ml)
-- Countables: `serving_size: 1, serving_unit: "count"` (nutrition per 1 item)
-- Convert package nutrition using formula: `(value / package_grams) * 100`
-- You can add preference: "liked", "disliked", or "neutral"
+### Step 3: Create a Recipe
 
-**The ONLY valid serving_unit values:**
-- `"g"` - for all solids (with serving_size: 100)
-- `"ml"` - for all liquids (with serving_size: 100)
-- `"count"` - for countable items (with serving_size: 1)
-
-### Step 3: Create a Recipe (for multi-ingredient meals)
-
-If the meal has multiple ingredients, create a recipe:
 ```
 create_recipe(
-  name: "Grilled Chicken Salad",
-  servings_produced: 2,  // how many servings this recipe makes
-  is_favorite: false,
-  notes: "Light lunch option"
+  name: "Overnight Oats Base Mix",
+  servings_produced: 10,
+  is_favorite: true,
+  notes: "Makes ~6 cups dry mix. ½ cup = 1 serving."
 )
 ```
 
-This returns the recipe ID.
+### Step 4: Add Ingredients (WITH GRAM CONVERSIONS)
 
-### Step 4: Add Ingredients to Recipe
+For each ingredient, **convert to grams/ml first**, then add:
 
-For each ingredient, add it to the recipe:
 ```
+# User wants: 4 cups rolled oats
+# Conversion: 4 cups × 80g/cup = 320g
+
 add_recipe_ingredient(
-  recipe_id: 1,
-  food_item_id: 5,  // the chicken breast
-  quantity: 200,     // amount used in entire recipe
-  unit: "g"
+  recipe_id: 6,
+  food_item_id: 32,
+  quantity: 320,
+  unit: "g",
+  notes: "4 cups × 80g/cup"
 )
 ```
 
-**Important:**
-- Quantity is for the ENTIRE recipe, not per serving
-- Nutrition is automatically calculated and cached
-- Each food item can only be added once per recipe (use update to change quantity)
-- Units are intelligently converted (see Unit Management section above)
+```
+# User wants: 8 scoops ON Whey
+# Conversion: 8 scoops × 31g/scoop = 248g
 
-### Step 4b: Add Component Recipes (optional)
+add_recipe_ingredient(
+  recipe_id: 6,
+  food_item_id: 29,
+  quantity: 248,
+  unit: "g",
+  notes: "8 scoops × 31g/scoop"
+)
+```
 
-Recipes can use other recipes as components (sub-recipes):
+```
+# User wants: 1 cup oat milk
+# Conversion: 1 cup = 240ml
+
+add_recipe_ingredient(
+  recipe_id: 8,
+  food_item_id: 35,
+  quantity: 240,
+  unit: "ml",
+  notes: "1 cup = 240ml"
+)
+```
+
+```
+# User wants: ½ banana
+# Banana is a count item, so use fraction
+
+add_recipe_ingredient(
+  recipe_id: 8,
+  food_item_id: 53,
+  quantity: 0.5,
+  unit: "count",
+  notes: "½ banana added in morning"
+)
+```
+
+### Step 5: Add Component Recipes (optional)
+
+Recipes can include other recipes as sub-components:
+
 ```
 add_recipe_component(
-  recipe_id: 1,          // parent recipe
-  component_recipe_id: 5, // the sub-recipe to include
-  servings: 2            // how many servings of the component to use
+  recipe_id: 8,           // DIYOO - Blueberry Donut
+  component_recipe_id: 6, // DIYOO Base Mix
+  servings: 1,            // 1 serving of base mix
+  notes: null
 )
 ```
 
-**Example use case:** A "Burrito Bowl" recipe might include:
-- "Cilantro Lime Rice" recipe (2 servings)
-- "Black Beans" recipe (1 serving)
-- Plus individual food items like chicken, salsa, cheese
+The system correctly pulls the per-serving nutrition from the component recipe.
 
-**Important:**
-- Circular references are automatically prevented (A cannot use B if B uses A)
-- Component nutrition is automatically included in parent recipe calculation
-- Use `update_recipe_component` to change servings
-- Use `remove_recipe_component` to remove a component
+### Step 6: Verify Recipe Nutrition
 
-**Unit handling:**
-- Use `unit: "serving"` when quantity represents number of servings (most common)
-  - e.g., `quantity: 1.0, unit: "serving"` = 1 serving of the food item
-  - e.g., `quantity: 0.5, unit: "serving"` = half a serving
-- Use matching units (g, ml, tbsp, etc.) when specifying raw amounts
-  - e.g., `quantity: 200, unit: "g"` with a food item that has `serving_size: 100, serving_unit: "g"`
-  - This calculates: 200g / 100g per serving = 2 servings worth of nutrition
-- **Cross-unit conversion** - The system handles unit mismatches automatically
-  - e.g., `quantity: 8, unit: "tbsp"` with `serving_unit: "tbsp (20g)"` = 8 tbsp = 160g
+```
+get_recipe(id: 8)
+```
 
-### Step 5: Log the Meal
+Check that the `nutrition_per_serving` values are reasonable. If they seem way off (e.g., 1500 calories for overnight oats), the ingredients likely have unit conversion errors.
 
-Now log the consumption to a specific day:
+### Step 7: Log the Meal
 
-**Option A: Log a recipe**
 ```
 log_meal(
-  date: "2026-01-10",
-  meal_type: "lunch",  // breakfast, lunch, dinner, snack, unspecified
-  recipe_id: 1,
-  servings: 1,         // how many servings you ate
-  percent_eaten: 100   // optional, default 100
+  date: "2026-01-13",
+  meal_type: "breakfast",
+  recipe_id: 8,
+  servings: 1,
+  percent_eaten: 100
 )
 ```
 
-**Option B: Log a single food item directly**
+---
+
+## Fixing Existing Recipe Ingredients
+
+If you find a recipe with wrong units (e.g., "4 cups" instead of "320g"):
+
 ```
-log_meal(
-  date: "2026-01-10",
-  meal_type: "snack",
-  food_item_id: 3,
-  servings: 1.5
+update_recipe_ingredient(
+  id: 34,           // ingredient ID
+  quantity: 320,    // corrected gram amount
+  unit: "g",        // correct unit
+  notes: "4 cups × 80g/cup"
 )
 ```
 
-### Step 6: View Daily Summary
+Then recalculate the recipe:
 
-Check the day's nutrition totals:
 ```
-get_day(date: "2026-01-10")
+recalculate_recipe_nutrition(recipe_id: 6)
 ```
 
-This returns all meals organized by type (breakfast/lunch/dinner/snack) with nutrition totals.
+---
+
+## Quick Conversion Checklist
+
+When adding a recipe ingredient, ask yourself:
+
+1. **What's the food item's base unit?**
+   - Check `serving_unit` (should be "g", "ml", or "count")
+
+2. **What unit is the user giving me?**
+   - If cups, tbsp, scoops → convert to grams
+   - If fl oz, cups (liquid) → convert to ml
+   - If "half", "2 pieces" → use decimal with count
+
+3. **Do I know the conversion factor?**
+   - Check the reference table above
+   - If unknown, search for "[ingredient] grams per cup" or check package
+
+4. **Store in matching units with notes:**
+   ```
+   quantity: [converted_amount],
+   unit: "[g/ml/count]",
+   notes: "[original_amount] × [conversion_factor]"
+   ```
+
+---
+
+## Common Mistakes to Avoid
+
+### ❌ Mistake 1: Using volume units for solid food items
+```
+quantity: 4, unit: "cup"  // Won't calculate correctly!
+```
+**Fix:** Convert to grams first
+
+### ❌ Mistake 2: Using "serving" as a unit for food items
+```
+quantity: 1, unit: "serving"  // Ambiguous!
+```
+**Fix:** For count items, use `unit: "count"`. For weight items, use `unit: "g"` with the gram amount.
+
+### ❌ Mistake 3: Forgetting that food items are per 100g/100ml
+If you add `quantity: 1, unit: "g"` for something stored per 100g, you're only getting 1% of the nutrition!
+
+**Example:** Oat milk is 46 cal per 100ml
+- `quantity: 1, unit: "ml"` → 0.46 cal (wrong!)
+- `quantity: 240, unit: "ml"` → 110 cal (correct for 1 cup)
+
+### ❌ Mistake 4: Not documenting conversions
+Six months later, you won't remember if "248g" was 8 scoops or something else.
+
+**Fix:** Always use the notes field: `notes: "8 scoops × 31g/scoop"`
+
+---
+
+## Summary
+
+1. **Food items** → Always per 100g, 100ml, or 1 count
+2. **Recipe ingredients** → Always in grams or ml (Claude converts from cups/tbsp/scoops)
+3. **Document conversions** → Use notes field for future reference
+4. **Verify results** → Check that `nutrition_per_serving` is reasonable after adding ingredients
 
 ## Quick Reference
 
