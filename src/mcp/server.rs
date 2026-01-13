@@ -246,6 +246,27 @@ pub struct AddRecipeIngredientParams {
     pub notes: Option<String>,
 }
 
+/// Single ingredient for batch add
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BatchIngredientParam {
+    /// Food item ID to add
+    pub food_item_id: i64,
+    /// Quantity in grams (for solids) or ml (for liquids)
+    pub quantity: f64,
+    /// Unit: "g" for solids, "ml" for liquids, "servings" for count items
+    pub unit: String,
+    /// Optional notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddRecipeIngredientsBatchParams {
+    /// Recipe ID to add ingredients to
+    pub recipe_id: i64,
+    /// Array of ingredients to add
+    pub ingredients: Vec<BatchIngredientParam>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UpdateRecipeIngredientParams {
     /// Recipe ingredient ID to update
@@ -898,6 +919,21 @@ impl UhmService {
     fn add_recipe_ingredient(&self, Parameters(p): Parameters<AddRecipeIngredientParams>) -> Result<CallToolResult, McpError> {
         let data = RecipeIngredientCreate { recipe_id: p.recipe_id, food_item_id: p.food_item_id, quantity: p.quantity, unit: p.unit, notes: p.notes };
         let result = recipes::add_recipe_ingredient(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Add multiple ingredients to a recipe in one call. PREFERRED over add_recipe_ingredient for efficiency - reduces tool calls from N to 1 and only recalculates nutrition once.")]
+    fn add_recipe_ingredients_batch(&self, Parameters(p): Parameters<AddRecipeIngredientsBatchParams>) -> Result<CallToolResult, McpError> {
+        use crate::tools::recipes::BatchIngredient;
+        let ingredients: Vec<BatchIngredient> = p.ingredients.into_iter().map(|i| BatchIngredient {
+            food_item_id: i.food_item_id,
+            quantity: i.quantity,
+            unit: i.unit,
+            notes: i.notes,
+        }).collect();
+        let result = recipes::add_recipe_ingredients_batch(&self.database, p.recipe_id, ingredients)
+            .map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }

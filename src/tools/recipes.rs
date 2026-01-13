@@ -82,6 +82,37 @@ pub struct AddIngredientResponse {
     pub unit: String,
 }
 
+/// Single ingredient for batch add
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BatchIngredient {
+    pub food_item_id: i64,
+    pub quantity: f64,
+    pub unit: String,
+    pub notes: Option<String>,
+}
+
+/// Result for a single ingredient in batch add
+#[derive(Debug, Serialize)]
+pub struct BatchIngredientResult {
+    pub food_item_id: i64,
+    pub food_item_name: String,
+    pub success: bool,
+    pub ingredient_id: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// Response for batch add_recipe_ingredients
+#[derive(Debug, Serialize)]
+pub struct BatchAddIngredientsResponse {
+    pub recipe_id: i64,
+    pub recipe_name: String,
+    pub total_requested: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub results: Vec<BatchIngredientResult>,
+    pub nutrition_per_serving: Nutrition,
+}
+
 /// Response for recipe nutrition recalculation
 #[derive(Debug, Serialize)]
 pub struct RecalculateNutritionResponse {
@@ -396,6 +427,142 @@ pub fn add_recipe_ingredient(
         food_item_id: ingredient.food_item_id,
         quantity: ingredient.quantity,
         unit: ingredient.unit,
+    })
+}
+
+/// Add multiple ingredients to a recipe in one call (batch operation)
+/// This is much faster than calling add_recipe_ingredient multiple times
+/// because it only recalculates nutrition once at the end.
+pub fn add_recipe_ingredients_batch(
+    db: &Database,
+    recipe_id: i64,
+    ingredients: Vec<BatchIngredient>,
+) -> Result<BatchAddIngredientsResponse, String> {
+    use crate::models::FoodItem;
+    use std::collections::HashSet;
+
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Validate recipe exists
+    let recipe = Recipe::get_by_id(&conn, recipe_id)
+        .map_err(|e| format!("Database error checking recipe: {}", e))?
+        .ok_or_else(|| format!("Recipe not found with id: {}", recipe_id))?;
+
+    // Get existing ingredient food_item_ids for duplicate checking
+    let existing: HashSet<i64> = RecipeIngredient::get_for_recipe(&conn, recipe_id)
+        .map_err(|e| format!("Database error checking existing ingredients: {}", e))?
+        .into_iter()
+        .map(|i| i.food_item_id)
+        .collect();
+
+    let total_requested = ingredients.len();
+    let mut results = Vec::with_capacity(total_requested);
+    let mut successful = 0;
+    let mut failed = 0;
+
+    for ing in ingredients {
+        // Validate food item exists
+        let food_item = match FoodItem::get_by_id(&conn, ing.food_item_id) {
+            Ok(Some(fi)) => fi,
+            Ok(None) => {
+                results.push(BatchIngredientResult {
+                    food_item_id: ing.food_item_id,
+                    food_item_name: format!("Unknown (id: {})", ing.food_item_id),
+                    success: false,
+                    ingredient_id: None,
+                    error: Some(format!("Food item not found with id: {}", ing.food_item_id)),
+                });
+                failed += 1;
+                continue;
+            }
+            Err(e) => {
+                results.push(BatchIngredientResult {
+                    food_item_id: ing.food_item_id,
+                    food_item_name: format!("Unknown (id: {})", ing.food_item_id),
+                    success: false,
+                    ingredient_id: None,
+                    error: Some(format!("Database error: {}", e)),
+                });
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Check for duplicate
+        if existing.contains(&ing.food_item_id) {
+            results.push(BatchIngredientResult {
+                food_item_id: ing.food_item_id,
+                food_item_name: food_item.name,
+                success: false,
+                ingredient_id: None,
+                error: Some("Food item already exists in recipe".to_string()),
+            });
+            failed += 1;
+            continue;
+        }
+
+        // Validate quantity
+        if ing.quantity <= 0.0 {
+            results.push(BatchIngredientResult {
+                food_item_id: ing.food_item_id,
+                food_item_name: food_item.name,
+                success: false,
+                ingredient_id: None,
+                error: Some("Quantity must be greater than 0".to_string()),
+            });
+            failed += 1;
+            continue;
+        }
+
+        // Create the ingredient
+        let data = RecipeIngredientCreate {
+            recipe_id,
+            food_item_id: ing.food_item_id,
+            quantity: ing.quantity,
+            unit: ing.unit,
+            notes: ing.notes,
+        };
+
+        match RecipeIngredient::create(&conn, &data) {
+            Ok(ingredient) => {
+                results.push(BatchIngredientResult {
+                    food_item_id: ing.food_item_id,
+                    food_item_name: food_item.name,
+                    success: true,
+                    ingredient_id: Some(ingredient.id),
+                    error: None,
+                });
+                successful += 1;
+            }
+            Err(e) => {
+                results.push(BatchIngredientResult {
+                    food_item_id: ing.food_item_id,
+                    food_item_name: food_item.name,
+                    success: false,
+                    ingredient_id: None,
+                    error: Some(format!("Failed to create: {}", e)),
+                });
+                failed += 1;
+            }
+        }
+    }
+
+    // Recalculate nutrition ONCE at the end (only if we added at least one ingredient)
+    let nutrition = if successful > 0 {
+        recalculate_recipe_nutrition(&conn, recipe_id)
+            .map_err(|e| format!("Failed to recalculate nutrition: {}", e))?
+    } else {
+        recipe.cached_nutrition
+    };
+
+    Ok(BatchAddIngredientsResponse {
+        recipe_id,
+        recipe_name: recipe.name,
+        total_requested,
+        successful,
+        failed,
+        results,
+        nutrition_per_serving: nutrition,
     })
 }
 

@@ -330,57 +330,54 @@ create_recipe(
 
 ### Step 4: Add Ingredients (WITH GRAM CONVERSIONS)
 
-For each ingredient, **convert to grams/ml first**, then add:
+**IMPORTANT: Use `add_recipe_ingredients_batch` for efficiency!**
+
+This batch tool adds ALL ingredients in ONE call, which is much faster than calling `add_recipe_ingredient` multiple times (reduces from N tool calls to 1, and only recalculates nutrition once).
+
+For each ingredient, **convert to grams/ml first**, then add all at once:
 
 ```
-# User wants: 4 cups rolled oats
-# Conversion: 4 cups × 80g/cup = 320g
+add_recipe_ingredients_batch(
+  recipe_id: 6,
+  ingredients: [
+    {
+      food_item_id: 32,      // Rolled oats
+      quantity: 320,         // 4 cups × 80g/cup = 320g
+      unit: "g",
+      notes: "4 cups × 80g/cup"
+    },
+    {
+      food_item_id: 29,      // ON Whey Protein
+      quantity: 248,         // 8 scoops × 31g/scoop = 248g
+      unit: "g",
+      notes: "8 scoops × 31g/scoop"
+    },
+    {
+      food_item_id: 35,      // Oat milk
+      quantity: 240,         // 1 cup = 240ml
+      unit: "ml",
+      notes: "1 cup = 240ml"
+    },
+    {
+      food_item_id: 53,      // Banana (count item)
+      quantity: 0.5,
+      unit: "count",
+      notes: "½ banana added in morning"
+    }
+  ]
+)
+```
 
+The response shows success/failure for each ingredient and the final recipe nutrition.
+
+**Alternative: Single ingredient add** (use only when adding ONE ingredient):
+```
 add_recipe_ingredient(
   recipe_id: 6,
   food_item_id: 32,
   quantity: 320,
   unit: "g",
   notes: "4 cups × 80g/cup"
-)
-```
-
-```
-# User wants: 8 scoops ON Whey
-# Conversion: 8 scoops × 31g/scoop = 248g
-
-add_recipe_ingredient(
-  recipe_id: 6,
-  food_item_id: 29,
-  quantity: 248,
-  unit: "g",
-  notes: "8 scoops × 31g/scoop"
-)
-```
-
-```
-# User wants: 1 cup oat milk
-# Conversion: 1 cup = 240ml
-
-add_recipe_ingredient(
-  recipe_id: 8,
-  food_item_id: 35,
-  quantity: 240,
-  unit: "ml",
-  notes: "1 cup = 240ml"
-)
-```
-
-```
-# User wants: ½ banana
-# Banana is a count item, so use fraction
-
-add_recipe_ingredient(
-  recipe_id: 8,
-  food_item_id: 53,
-  quantity: 0.5,
-  unit: "count",
-  notes: "½ banana added in morning"
 )
 ```
 

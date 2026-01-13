@@ -38,7 +38,8 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - `list_recipes` - List with search, favorites filter, sorting
 - `update_recipe` - Update metadata (blocked if logged in meals)
 - `delete_recipe` - Delete unused recipes (blocked if logged or used as component)
-- `add_recipe_ingredient` - Add food items to recipes
+- `add_recipe_ingredient` - Add single food item to recipe
+- `add_recipe_ingredients_batch` - **PREFERRED** Add multiple ingredients in ONE call (much faster)
 - `update_recipe_ingredient` - Modify ingredient quantities
 - `remove_recipe_ingredient` - Remove ingredients
 - `recalculate_recipe_nutrition` - Force nutrition recalculation
@@ -165,6 +166,32 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/mcp/server.rs` - Batch state, new tools
   - `src/tools/food_items.rs` - `update_food_item_no_cascade`, `batch_cascade_recalculate`
   - `src/tools/status.rs` - Batch update documentation in meal_instructions
+
+### Phase 13: Batch Recipe Ingredients
+- **Purpose**: Fast recipe creation by adding all ingredients in one tool call
+- **Problem Solved**: Building an 8-ingredient recipe required 9 tool calls (1 create + 8 add_ingredient), with Claude Desktop thinking time between each call leading to ~2 minute build times
+- **New Tool**:
+  - `add_recipe_ingredients_batch` - Add multiple ingredients in ONE call
+- **Benefits**:
+  - Reduces tool calls from N+1 to 2 (create_recipe + add_recipe_ingredients_batch)
+  - Only recalculates nutrition ONCE at the end (not after each ingredient)
+  - Eliminates Claude Desktop thinking time overhead between ingredient additions
+  - Returns detailed success/failure status for each ingredient
+- **Usage**:
+  ```
+  add_recipe_ingredients_batch(
+    recipe_id: 6,
+    ingredients: [
+      { food_item_id: 32, quantity: 320, unit: "g", notes: "4 cups" },
+      { food_item_id: 29, quantity: 248, unit: "g", notes: "8 scoops" },
+      ...
+    ]
+  )
+  ```
+- **Files Modified**:
+  - `src/tools/recipes.rs` - `BatchIngredient`, `add_recipe_ingredients_batch`
+  - `src/mcp/server.rs` - Tool registration
+  - `src/tools/status.rs` - Updated meal_instructions
 
 ## Technology Stack
 
