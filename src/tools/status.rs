@@ -22,7 +22,80 @@ To log a meal, you need:
 2. **Recipes** (optional) - Collections of food items
 3. **Meal Entry** - The actual logged consumption attached to a day
 
-## Unit Management Module (UMM)
+## MANDATORY Unit Standards (READ FIRST)
+
+When adding food items, you MUST follow these strict rules for consistency:
+
+### Unit Selection Decision Tree
+
+1. **Is it countable?** (sushi pieces, eggs, cookies, pills)
+   → Use `serving_unit: "count"` with `serving_size: 1`
+   → ALWAYS use "count", never "piece", "each", "item", or "unit"
+
+2. **Is it a solid/semi-solid measured by weight?** (meat, cheese, vegetables, powders)
+   → Use `serving_unit: "g"` (grams)
+   → Use the package serving size in grams, or 100g if unknown
+
+3. **Is it a liquid?** (milk, juice, oil)
+   → Use `serving_unit: "ml"` (milliliters)
+
+4. **Is it measured by volume but has known weight?** (peanut butter, sauces, spreads)
+   → Use compound unit: `serving_unit: "tbsp (15g)"` or `"cup (240g)"`
+   → ALWAYS include the gram weight in parentheses
+
+### NEVER Use These Units
+
+- "handful" → Convert to grams
+- "portion" → Convert to grams or count
+- "serving" → Be specific (grams, count, etc.)
+- "piece" → Use "count" instead
+- "each" → Use "count" instead
+- "some" → Convert to grams
+- "small/medium/large" → Convert to grams
+
+### Examples by Food Type
+
+| Food Type | serving_size | serving_unit | Notes |
+|-----------|--------------|--------------|-------|
+| Sushi (nigiri) | 1 | count | Per piece |
+| Eggs | 1 | count | Per egg |
+| Chicken breast | 100 | g | Or package serving |
+| Rice (cooked) | 150 | g | Typical portion |
+| Peanut butter | 2 | tbsp (32g) | Include gram weight |
+| Olive oil | 1 | tbsp (14g) | Include gram weight |
+| Milk | 240 | ml | Or use cup (240ml) |
+| Freeze-dried fruit | 10 | g | By weight, not handful |
+| Protein powder | 1 | scoop (30g) | Include gram weight |
+| Cookies | 1 | count | Per cookie |
+| Salad dressing | 2 | tbsp (30g) | Include gram weight |
+
+### Restaurant/Prepared Foods
+
+For restaurant items like sushi, burritos, etc.:
+- **Individual pieces** (sushi, dumplings): Use `count` with serving_size=1
+- **Whole items** (burrito, sandwich): Use `count` with serving_size=1
+- **By weight items** (salad bar): Use `g`
+
+**Example - Salmon Nigiri Sushi:**
+```
+add_food_item(
+  name: "Salmon Nigiri",
+  serving_size: 1,
+  serving_unit: "count",  // NOT "piece" or "each"
+  calories: 40,
+  protein: 2.5,
+  ...
+)
+```
+
+### Fixing Incorrect Units
+
+If you encounter a food item with a vague unit like "handful":
+1. Look up the actual gram weight
+2. Use `update_food_item` to change to grams
+3. Example: "handful" of strawberries → typically 40-50g
+
+## Unit Conversion System
 
 UHM includes a smart unit conversion system that handles various unit formats:
 
@@ -30,7 +103,7 @@ UHM includes a smart unit conversion system that handles various unit formats:
 
 **Weight units:** g, oz, lb, kg
 **Volume units:** tbsp, tsp, cup, ml, fl oz
-**Count units:** each, piece, slice, serving
+**Count units:** count (standardized - always use "count")
 
 ### Compound Units
 
@@ -86,16 +159,18 @@ add_food_item(
 
 **Tips:**
 - Nutrition values are PER SERVING
+- ALWAYS follow the Unit Standards section above
 - Use compound units for volume-based items: `serving_unit: "tbsp (20g)"`
 - The system auto-calculates `grams_per_serving` and `ml_per_serving`
 - You can add preference: "liked", "disliked", or "neutral"
 
-**Serving Unit Examples:**
-- `"g"` - weight in grams (most accurate)
-- `"oz"` - weight in ounces
-- `"tbsp (20g)"` - tablespoon with gram weight (recommended for spreads, sauces)
+**Serving Unit Quick Reference:**
+- `"g"` - weight in grams (default for solids)
+- `"ml"` - volume in milliliters (for liquids)
+- `"count"` - for countable items (ALWAYS use "count", not "piece" or "each")
+- `"tbsp (20g)"` - tablespoon with gram weight (for spreads, sauces)
 - `"cup (240g)"` - cup with gram weight
-- `"each"` or `"piece"` - count-based (eggs, slices)
+- `"scoop (30g)"` - custom measure with gram weight
 
 ### Step 3: Create a Recipe (for multi-ingredient meals)
 
