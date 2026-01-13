@@ -24,76 +24,125 @@ To log a meal, you need:
 
 ## MANDATORY Unit Standards (READ FIRST)
 
-When adding food items, you MUST follow these strict rules for consistency:
+ALL food items MUST use one of these three standardized formats:
+
+### The Three Standard Formats
+
+| Category | serving_size | serving_unit | Nutrition stored as |
+|----------|--------------|--------------|---------------------|
+| **Solids** | 100 | g | per 100 grams |
+| **Liquids** | 100 | ml | per 100 milliliters |
+| **Countables** | 1 | count | per 1 item |
+
+**NO EXCEPTIONS.** This ensures consistent, accurate calculations.
 
 ### Unit Selection Decision Tree
 
-1. **Is it countable?** (sushi pieces, eggs, cookies, pills)
-   → Use `serving_unit: "count"` with `serving_size: 1`
+1. **Is it countable?** (sushi pieces, eggs, cookies, whole fruits, pills)
+   → `serving_size: 1, serving_unit: "count"`
+   → Nutrition = per 1 item
    → ALWAYS use "count", never "piece", "each", "item", or "unit"
 
-2. **Is it a solid/semi-solid measured by weight?** (meat, cheese, vegetables, powders)
-   → Use `serving_unit: "g"` (grams)
-   → Use the package serving size in grams, or 100g if unknown
+2. **Is it a solid/semi-solid?** (meat, cheese, vegetables, rice, powders, spreads)
+   → `serving_size: 100, serving_unit: "g"`
+   → Nutrition = per 100 grams
+   → Convert package nutrition to per-100g values
 
-3. **Is it a liquid?** (milk, juice, oil)
-   → Use `serving_unit: "ml"` (milliliters)
+3. **Is it a liquid?** (milk, juice, oil, broth, sauces)
+   → `serving_size: 100, serving_unit: "ml"`
+   → Nutrition = per 100 milliliters
+   → Convert package nutrition to per-100ml values
 
-4. **Is it measured by volume but has known weight?** (peanut butter, sauces, spreads)
-   → Use compound unit: `serving_unit: "tbsp (15g)"` or `"cup (240g)"`
-   → ALWAYS include the gram weight in parentheses
+### Converting Package Nutrition to Standard Format
+
+Most packages show nutrition "per serving" (e.g., "per 2 tbsp (32g)"). Convert to per-100g:
+
+**Formula:** `(nutrition_value / package_grams) * 100`
+
+**Example - Peanut Butter:**
+- Package says: 190 cal per 2 tbsp (32g)
+- Convert: (190 / 32) * 100 = 594 calories per 100g
+- Store as: `serving_size: 100, serving_unit: "g", calories: 594`
+
+**Example - Orange Juice:**
+- Package says: 110 cal per 240ml
+- Convert: (110 / 240) * 100 = 46 calories per 100ml
+- Store as: `serving_size: 100, serving_unit: "ml", calories: 46`
 
 ### NEVER Use These Units
 
-- "handful" → Convert to grams
+- "handful" → Convert to grams, store per 100g
 - "portion" → Convert to grams or count
-- "serving" → Be specific (grams, count, etc.)
+- "serving" → Be specific (100g, 100ml, or count)
 - "piece" → Use "count" instead
 - "each" → Use "count" instead
-- "some" → Convert to grams
-- "small/medium/large" → Convert to grams
+- "tbsp", "cup", "scoop" → Convert to grams, store per 100g
+- "small/medium/large" → Convert to grams, store per 100g
 
 ### Examples by Food Type
 
-| Food Type | serving_size | serving_unit | Notes |
-|-----------|--------------|--------------|-------|
-| Sushi (nigiri) | 1 | count | Per piece |
-| Eggs | 1 | count | Per egg |
-| Chicken breast | 100 | g | Or package serving |
-| Rice (cooked) | 150 | g | Typical portion |
-| Peanut butter | 2 | tbsp (32g) | Include gram weight |
-| Olive oil | 1 | tbsp (14g) | Include gram weight |
-| Milk | 240 | ml | Or use cup (240ml) |
-| Freeze-dried fruit | 10 | g | By weight, not handful |
-| Protein powder | 1 | scoop (30g) | Include gram weight |
-| Cookies | 1 | count | Per cookie |
-| Salad dressing | 2 | tbsp (30g) | Include gram weight |
+| Food Type | serving_size | serving_unit | Nutrition is per... |
+|-----------|--------------|--------------|---------------------|
+| Chicken breast | 100 | g | 100g of chicken |
+| Rice (cooked) | 100 | g | 100g of rice |
+| Peanut butter | 100 | g | 100g of peanut butter |
+| Olive oil | 100 | ml | 100ml of oil |
+| Milk | 100 | ml | 100ml of milk |
+| Orange juice | 100 | ml | 100ml of juice |
+| Eggs | 1 | count | 1 egg (~50g) |
+| Sushi (nigiri) | 1 | count | 1 piece |
+| Cookies | 1 | count | 1 cookie |
+| Apple | 1 | count | 1 medium apple (~180g) |
+| Protein powder | 100 | g | 100g (not per scoop) |
+| Freeze-dried fruit | 100 | g | 100g (not per handful) |
 
 ### Restaurant/Prepared Foods
 
-For restaurant items like sushi, burritos, etc.:
-- **Individual pieces** (sushi, dumplings): Use `count` with serving_size=1
-- **Whole items** (burrito, sandwich): Use `count` with serving_size=1
-- **By weight items** (salad bar): Use `g`
+- **Individual pieces** (sushi, dumplings, wings): `serving_size: 1, serving_unit: "count"`
+- **Whole items** (burrito, sandwich, burger): `serving_size: 1, serving_unit: "count"`
+- **By weight items** (salad bar, deli meat): `serving_size: 100, serving_unit: "g"`
 
 **Example - Salmon Nigiri Sushi:**
 ```
 add_food_item(
   name: "Salmon Nigiri",
   serving_size: 1,
-  serving_unit: "count",  // NOT "piece" or "each"
-  calories: 40,
+  serving_unit: "count",
+  calories: 40,      // per 1 piece
   protein: 2.5,
   ...
 )
 ```
 
+**Example - Chicken Breast:**
+```
+add_food_item(
+  name: "Chicken Breast (grilled)",
+  serving_size: 100,
+  serving_unit: "g",
+  calories: 165,     // per 100g
+  protein: 31,
+  ...
+)
+```
+
+### Logging Meals with Standard Units
+
+When logging, specify the actual amount consumed:
+- "I ate 150g of chicken" → `log_meal(..., servings: 1.5)` (1.5 × 100g)
+- "I drank 250ml of milk" → `log_meal(..., servings: 2.5)` (2.5 × 100ml)
+- "I ate 3 pieces of sushi" → `log_meal(..., servings: 3)` (3 × 1 count)
+
 ### Fixing Incorrect Units
 
-If you encounter a food item with a vague unit like "handful":
-1. Look up the actual gram weight
-2. Use `update_food_item` to change to grams
-3. Example: "handful" of strawberries → typically 40-50g
+If you encounter a food item with non-standard units:
+1. Look up the gram/ml weight
+2. Convert nutrition to per-100g or per-100ml
+3. Use `update_food_item` to fix it
+
+**Example:** Food item has "1 handful (30g)" with 50 calories
+- Convert: (50 / 30) * 100 = 167 calories per 100g
+- Fix: `update_food_item(id, serving_size: 100, serving_unit: "g", calories: 167)`
 
 ## Unit Conversion System
 
@@ -138,14 +187,16 @@ search_food_items(query: "chicken breast")
 
 ### Step 2: Add Food Items (if needed)
 
-If the food item doesn't exist, create it with nutritional info per serving:
+If the food item doesn't exist, create it following the MANDATORY standards:
+
+**For solids (per 100g):**
 ```
 add_food_item(
-  name: "Chicken Breast",
-  brand: null,  // or brand name for packaged foods
+  name: "Chicken Breast (grilled)",
+  brand: null,
   serving_size: 100,
   serving_unit: "g",
-  calories: 165,
+  calories: 165,     // per 100g
   protein: 31,
   carbs: 0,
   fat: 3.6,
@@ -157,20 +208,48 @@ add_food_item(
 )
 ```
 
+**For liquids (per 100ml):**
+```
+add_food_item(
+  name: "Whole Milk",
+  brand: null,
+  serving_size: 100,
+  serving_unit: "ml",
+  calories: 61,      // per 100ml
+  protein: 3.2,
+  carbs: 4.8,
+  fat: 3.3,
+  ...
+)
+```
+
+**For countables (per 1 item):**
+```
+add_food_item(
+  name: "Large Egg",
+  brand: null,
+  serving_size: 1,
+  serving_unit: "count",
+  calories: 72,      // per 1 egg
+  protein: 6.3,
+  carbs: 0.4,
+  fat: 4.8,
+  ...
+)
+```
+
 **Tips:**
-- Nutrition values are PER SERVING
-- ALWAYS follow the Unit Standards section above
-- Use compound units for volume-based items: `serving_unit: "tbsp (20g)"`
-- The system auto-calculates `grams_per_serving` and `ml_per_serving`
+- ALWAYS follow the MANDATORY Unit Standards section above
+- Solids: `serving_size: 100, serving_unit: "g"` (nutrition per 100g)
+- Liquids: `serving_size: 100, serving_unit: "ml"` (nutrition per 100ml)
+- Countables: `serving_size: 1, serving_unit: "count"` (nutrition per 1 item)
+- Convert package nutrition using formula: `(value / package_grams) * 100`
 - You can add preference: "liked", "disliked", or "neutral"
 
-**Serving Unit Quick Reference:**
-- `"g"` - weight in grams (default for solids)
-- `"ml"` - volume in milliliters (for liquids)
-- `"count"` - for countable items (ALWAYS use "count", not "piece" or "each")
-- `"tbsp (20g)"` - tablespoon with gram weight (for spreads, sauces)
-- `"cup (240g)"` - cup with gram weight
-- `"scoop (30g)"` - custom measure with gram weight
+**The ONLY valid serving_unit values:**
+- `"g"` - for all solids (with serving_size: 100)
+- `"ml"` - for all liquids (with serving_size: 100)
+- `"count"` - for countable items (with serving_size: 1)
 
 ### Step 3: Create a Recipe (for multi-ingredient meals)
 
