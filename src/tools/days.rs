@@ -444,3 +444,61 @@ pub fn list_orphaned_days(db: &Database) -> Result<ListOrphanedDaysResponse, Str
 
     Ok(ListOrphanedDaysResponse { days, count })
 }
+
+/// Response for delete_day
+#[derive(Debug, Serialize)]
+pub struct DeleteDayResponse {
+    pub deleted: bool,
+    pub date: String,
+    pub message: String,
+}
+
+/// Delete a day by date (only if it has no meal entries)
+pub fn delete_day(db: &Database, date: &str) -> Result<DeleteDayResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // First, find the day
+    let day = Day::get_by_date(&conn, date)
+        .map_err(|e| format!("Failed to get day: {}", e))?;
+
+    let day = match day {
+        Some(d) => d,
+        None => {
+            return Ok(DeleteDayResponse {
+                deleted: false,
+                date: date.to_string(),
+                message: format!("Day not found: {}", date),
+            });
+        }
+    };
+
+    // Check if day has any meal entries
+    let meal_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meal_entries WHERE day_id = ?1",
+            [day.id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count meal entries: {}", e))?;
+
+    if meal_count > 0 {
+        return Ok(DeleteDayResponse {
+            deleted: false,
+            date: date.to_string(),
+            message: format!(
+                "Cannot delete day {} - it has {} meal entries. Delete the meal entries first.",
+                date, meal_count
+            ),
+        });
+    }
+
+    // Safe to delete
+    Day::delete(&conn, day.id)
+        .map_err(|e| format!("Failed to delete day: {}", e))?;
+
+    Ok(DeleteDayResponse {
+        deleted: true,
+        date: date.to_string(),
+        message: format!("Day {} deleted successfully", date),
+    })
+}

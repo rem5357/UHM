@@ -341,6 +341,12 @@ pub struct UpdateDayParams {
     pub notes: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteDayParams {
+    /// Date in ISO format: YYYY-MM-DD
+    pub date: String,
+}
+
 // ============================================================================
 // Meal Entry Parameter Structs
 // ============================================================================
@@ -1158,9 +1164,16 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "List all days with no meal entries (orphaned days). These are safe to delete.")]
+    #[tool(description = "List all days with no meal entries (orphaned days). These are safe to delete with delete_day.")]
     fn list_orphaned_days(&self) -> Result<CallToolResult, McpError> {
         let result = days::list_orphaned_days(&self.database).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete a day by date. Only succeeds if the day has no meal entries. Use list_orphaned_days to find days safe to delete.")]
+    fn delete_day(&self, Parameters(p): Parameters<DeleteDayParams>) -> Result<CallToolResult, McpError> {
+        let result = days::delete_day(&self.database, &p.date).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -1334,7 +1347,7 @@ impl ServerHandler for UhmService {
                  update/delete_medication require force=true. \
                  Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals. \
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
-                 Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days."
+                 Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),
             ),
         }
