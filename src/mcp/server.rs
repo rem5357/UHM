@@ -1368,10 +1368,12 @@ impl UhmService {
             "file_path": result.file_path,
             "total_rows": result.total_rows,
             "imported": result.imported,
+            "duplicates": result.duplicates,
             "skipped": result.skipped,
             "errors": result.errors,
             "date_range": result.date_range,
-            "message": format!("Imported {} BP/HR readings from {} rows", result.imported, result.total_rows)
+            "message": format!("Imported {} BP/HR readings ({} duplicates skipped, {} errors)",
+                result.imported, result.duplicates, result.skipped)
         });
         let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))

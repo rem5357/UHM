@@ -561,6 +561,7 @@ pub struct OmronImportResponse {
     pub file_path: String,
     pub total_rows: usize,
     pub imported: usize,
+    pub duplicates: usize,
     pub skipped: usize,
     pub errors: Vec<String>,
     pub date_range: String,
@@ -612,6 +613,27 @@ fn parse_omron_time(time_str: &str) -> Result<String, String> {
     Ok(format!("{:02}:{:02}:00", hour, minute))
 }
 
+/// Check if a BP reading already exists with matching timestamp and values
+fn bp_reading_exists(
+    conn: &rusqlite::Connection,
+    timestamp: &str,
+    systolic: f64,
+    diastolic: f64,
+) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(*) FROM vitals
+               WHERE vital_type = 'blood_pressure'
+               AND timestamp = ?1
+               AND value1 = ?2
+               AND value2 = ?3"#,
+            rusqlite::params![timestamp, systolic, diastolic],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to check for duplicates: {}", e))?;
+    Ok(count > 0)
+}
+
 /// Import Omron BP CSV file
 pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImportResponse, String> {
     use std::fs::File;
@@ -627,6 +649,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
     let mut readings = Vec::new();
     let mut errors = Vec::new();
     let mut skipped = 0;
+    let mut duplicates = 0;
     let mut first_date: Option<String> = None;
     let mut last_date: Option<String> = None;
 
@@ -714,6 +737,20 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
             "single".to_string()
         };
 
+        // Check for duplicate reading (same timestamp + BP values)
+        match bp_reading_exists(&conn, &timestamp, systolic as f64, diastolic as f64) {
+            Ok(true) => {
+                duplicates += 1;
+                continue; // Skip duplicate
+            }
+            Ok(false) => {} // Not a duplicate, continue
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        }
+
         // Create vital group for this reading
         let group_data = VitalGroupCreate {
             description: Some(format!("Omron BP reading")),
@@ -766,7 +803,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
     }
 
     let imported = readings.len();
-    let total_rows = imported + skipped;
+    let total_rows = imported + duplicates + skipped;
     let date_range = match (last_date, first_date) {
         (Some(start), Some(end)) => format!("{} to {}", start, end),
         _ => "N/A".to_string(),
@@ -777,6 +814,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         file_path: file_path.to_string(),
         total_rows,
         imported,
+        duplicates,
         skipped,
         errors: if errors.len() > 10 { errors[..10].to_vec() } else { errors },
         date_range,
