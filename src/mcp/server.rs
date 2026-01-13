@@ -671,6 +671,12 @@ pub struct DeleteVitalParams {
     pub id: i64,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImportOmronBpCsvParams {
+    /// Full path to the Omron CSV file (e.g., "C:\\Users\\name\\Downloads\\report.csv")
+    pub file_path: String,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -1349,6 +1355,25 @@ impl UhmService {
         let result = vitals::delete_vital(&self.database, p.id)
             .map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Import blood pressure and heart rate data from an Omron CSV export file. Creates grouped BP/HR vitals for each reading. File format: Date,Time,Systolic,Diastolic,Pulse,...")]
+    fn import_omron_bp_csv(&self, Parameters(p): Parameters<ImportOmronBpCsvParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::import_omron_bp_csv(&self.database, &p.file_path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        // Only return summary, not all readings (can be huge)
+        let summary = serde_json::json!({
+            "success": result.success,
+            "file_path": result.file_path,
+            "total_rows": result.total_rows,
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "errors": result.errors,
+            "date_range": result.date_range,
+            "message": format!("Imported {} BP/HR readings from {} rows", result.imported, result.total_rows)
+        });
+        let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }

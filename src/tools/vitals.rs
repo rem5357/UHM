@@ -535,3 +535,251 @@ pub fn delete_vital(db: &Database, id: i64) -> Result<DeleteResponse, String> {
         deleted_id: id,
     })
 }
+
+// ============================================================================
+// Omron CSV Import
+// ============================================================================
+
+/// Result for a single imported reading
+#[derive(Debug, Serialize)]
+pub struct OmronImportRow {
+    pub row_num: usize,
+    pub timestamp: String,
+    pub systolic: i32,
+    pub diastolic: i32,
+    pub pulse: i32,
+    pub truread: String,
+    pub group_id: i64,
+    pub bp_vital_id: i64,
+    pub hr_vital_id: i64,
+}
+
+/// Response for Omron CSV import
+#[derive(Debug, Serialize)]
+pub struct OmronImportResponse {
+    pub success: bool,
+    pub file_path: String,
+    pub total_rows: usize,
+    pub imported: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+    pub date_range: String,
+    pub readings: Vec<OmronImportRow>,
+}
+
+/// Parse Omron date format "Jan 6 2026" to "2026-01-06"
+fn parse_omron_date(date_str: &str) -> Result<String, String> {
+    let parts: Vec<&str> = date_str.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(format!("Invalid date format: {}", date_str));
+    }
+
+    let month = match parts[0].to_lowercase().as_str() {
+        "jan" => "01", "feb" => "02", "mar" => "03", "apr" => "04",
+        "may" => "05", "jun" => "06", "jul" => "07", "aug" => "08",
+        "sep" => "09", "oct" => "10", "nov" => "11", "dec" => "12",
+        _ => return Err(format!("Invalid month: {}", parts[0])),
+    };
+
+    let day: u32 = parts[1].parse().map_err(|_| format!("Invalid day: {}", parts[1]))?;
+    let year: u32 = parts[2].parse().map_err(|_| format!("Invalid year: {}", parts[2]))?;
+
+    Ok(format!("{:04}-{}-{:02}", year, month, day))
+}
+
+/// Parse Omron time format "8:18 am" to "08:18:00"
+fn parse_omron_time(time_str: &str) -> Result<String, String> {
+    let parts: Vec<&str> = time_str.split_whitespace().collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid time format: {}", time_str));
+    }
+
+    let time_parts: Vec<&str> = parts[0].split(':').collect();
+    if time_parts.len() != 2 {
+        return Err(format!("Invalid time format: {}", time_str));
+    }
+
+    let mut hour: u32 = time_parts[0].parse().map_err(|_| format!("Invalid hour: {}", time_parts[0]))?;
+    let minute: u32 = time_parts[1].parse().map_err(|_| format!("Invalid minute: {}", time_parts[1]))?;
+
+    let am_pm = parts[1].to_lowercase();
+    if am_pm == "pm" && hour != 12 {
+        hour += 12;
+    } else if am_pm == "am" && hour == 12 {
+        hour = 0;
+    }
+
+    Ok(format!("{:02}:{:02}:00", hour, minute))
+}
+
+/// Import Omron BP CSV file
+pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImportResponse, String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    // Read the file
+    let file = File::open(file_path)
+        .map_err(|e| format!("Failed to open file '{}': {}", file_path, e))?;
+    let reader = BufReader::new(file);
+
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let mut readings = Vec::new();
+    let mut errors = Vec::new();
+    let mut skipped = 0;
+    let mut first_date: Option<String> = None;
+    let mut last_date: Option<String> = None;
+
+    for (line_num, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|e| format!("Error reading line {}: {}", line_num + 1, e))?;
+
+        // Skip header row
+        if line_num == 0 && line.starts_with("Date,") {
+            continue;
+        }
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse CSV row
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.len() < 5 {
+            errors.push(format!("Row {}: Not enough fields", line_num + 1));
+            skipped += 1;
+            continue;
+        }
+
+        // Parse date and time
+        let date = match parse_omron_date(fields[0].trim()) {
+            Ok(d) => d,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let time = match parse_omron_time(fields[1].trim()) {
+            Ok(t) => t,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let timestamp = format!("{}T{}", date, time);
+
+        // Track date range
+        if first_date.is_none() {
+            first_date = Some(date.clone());
+        }
+        last_date = Some(date.clone());
+
+        // Parse vitals
+        let systolic: i32 = match fields[2].trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                errors.push(format!("Row {}: Invalid systolic value", line_num + 1));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let diastolic: i32 = match fields[3].trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                errors.push(format!("Row {}: Invalid diastolic value", line_num + 1));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let pulse: i32 = match fields[4].trim().parse() {
+            Ok(v) => v,
+            Err(_) => {
+                errors.push(format!("Row {}: Invalid pulse value", line_num + 1));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Get TruRead status
+        let truread = if fields.len() > 7 {
+            let tr = fields[7].trim();
+            if tr == "-" { "single".to_string() } else { tr.to_lowercase() }
+        } else {
+            "single".to_string()
+        };
+
+        // Create vital group for this reading
+        let group_data = VitalGroupCreate {
+            description: Some(format!("Omron BP reading")),
+            timestamp: Some(timestamp.clone()),
+            notes: if truread != "single" { Some(format!("TruRead: {}", truread)) } else { None },
+        };
+
+        let group = VitalGroup::create(&conn, &group_data)
+            .map_err(|e| format!("Row {}: Failed to create group: {}", line_num + 1, e))?;
+
+        // Create BP vital
+        let bp_data = VitalCreate {
+            vital_type: VitalType::BloodPressure,
+            timestamp: Some(timestamp.clone()),
+            value1: systolic as f64,
+            value2: Some(diastolic as f64),
+            unit: Some("mmHg".to_string()),
+            group_id: Some(group.id),
+            notes: None,
+        };
+
+        let bp_vital = Vital::create(&conn, &bp_data)
+            .map_err(|e| format!("Row {}: Failed to create BP vital: {}", line_num + 1, e))?;
+
+        // Create HR vital
+        let hr_data = VitalCreate {
+            vital_type: VitalType::HeartRate,
+            timestamp: Some(timestamp.clone()),
+            value1: pulse as f64,
+            value2: None,
+            unit: Some("bpm".to_string()),
+            group_id: Some(group.id),
+            notes: None,
+        };
+
+        let hr_vital = Vital::create(&conn, &hr_data)
+            .map_err(|e| format!("Row {}: Failed to create HR vital: {}", line_num + 1, e))?;
+
+        readings.push(OmronImportRow {
+            row_num: line_num + 1,
+            timestamp,
+            systolic,
+            diastolic,
+            pulse,
+            truread,
+            group_id: group.id,
+            bp_vital_id: bp_vital.id,
+            hr_vital_id: hr_vital.id,
+        });
+    }
+
+    let imported = readings.len();
+    let total_rows = imported + skipped;
+    let date_range = match (last_date, first_date) {
+        (Some(start), Some(end)) => format!("{} to {}", start, end),
+        _ => "N/A".to_string(),
+    };
+
+    Ok(OmronImportResponse {
+        success: errors.is_empty(),
+        file_path: file_path.to_string(),
+        total_rows,
+        imported,
+        skipped,
+        errors: if errors.len() > 10 { errors[..10].to_vec() } else { errors },
+        date_range,
+        readings,
+    })
+}

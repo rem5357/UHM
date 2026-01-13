@@ -193,6 +193,22 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/mcp/server.rs` - Tool registration
   - `src/tools/status.rs` - Updated meal_instructions
 
+### Phase 14: Omron BP Import
+- **Purpose**: Batch import blood pressure and heart rate data from Omron CSV exports
+- **Tool**: `import_omron_bp_csv`
+- **Input**: Full file path to Omron CSV export
+- **CSV Format**: Date, Time, Systolic (mmHg), Diastolic (mmHg), Pulse (bpm), Symptoms, Consumed, TruRead, Notes
+- **Processing**:
+  - Parses Omron date format ("Jan 6 2026") and time format ("8:18 am")
+  - Creates a vital group for each reading
+  - Adds BP vital (systolic/diastolic) linked to group
+  - Adds HR vital (pulse) linked to group
+  - Captures TruRead/Average status in group notes
+- **Response**: Summary with imported count, skipped count, errors, date range
+- **Files Modified**:
+  - `src/tools/vitals.rs` - `import_omron_bp_csv`, date/time parsing
+  - `src/mcp/server.rs` - Tool registration
+
 ## Technology Stack
 
 ### Rust
