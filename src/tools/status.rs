@@ -511,6 +511,71 @@ This feature is particularly useful for:
 - Updating serving sizes or units
 - All historical data automatically reflects corrections
 
+---
+
+## Batch Updates (For Updating Many Food Items)
+
+When updating many food items at once (e.g., standardizing all units to 100g/100ml), use batch mode to avoid performance issues.
+
+### Why Use Batch Mode?
+
+Without batch mode, each `update_food_item` triggers a full cascade recalculation:
+- Find all recipes using that item
+- Recalculate each recipe
+- Find all meals using those recipes
+- Recalculate all affected days
+
+If you update 50 food items that all affect the same 10 recipes, those 10 recipes get recalculated **50 times**!
+
+With batch mode, the cascade happens **once** at the end with all affected recipes/days combined.
+
+### Batch Update Workflow
+
+**Step 1: Start batch mode**
+```
+start_batch_update()
+```
+
+**Step 2: Update food items normally**
+```
+update_food_item(id: 1, serving_size: 100, serving_unit: "g", ...)
+update_food_item(id: 2, serving_size: 100, serving_unit: "g", ...)
+update_food_item(id: 3, serving_size: 100, serving_unit: "ml", ...)
+... (as many as needed)
+```
+
+During batch mode, updates happen immediately but cascade recalculation is deferred. You'll see `cascade_deferred: true` in responses.
+
+**Step 3: Finish batch mode**
+```
+finish_batch_update()
+```
+
+This performs ONE combined cascade for all changed food items and returns:
+```json
+{
+  "success": true,
+  "message": "Batch update completed successfully",
+  "food_items_processed": 50,
+  "recipes_recalculated": 10,
+  "days_recalculated": 25
+}
+```
+
+### When to Use Batch Mode
+
+- Standardizing units across all food items
+- Correcting nutrition data for multiple items
+- Any operation touching more than 5-10 food items
+
+### Important Notes
+
+- If Claude Desktop crashes during batch mode, the food item updates are already saved
+- Just call `finish_batch_update()` to complete the cascade
+- Calling `start_batch_update()` when already in batch mode is safe (returns current state)
+
+---
+
 ## Notes
 
 - Dates use ISO format: YYYY-MM-DD

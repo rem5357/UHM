@@ -325,6 +325,243 @@ pub fn update_food_item(
     }
 }
 
+/// Response for update without cascade (used in batch mode)
+#[derive(Debug, Serialize)]
+pub struct UpdateFoodItemNoCascadeResponse {
+    pub success: bool,
+    pub updated_at: String,
+    pub cascade_deferred: bool,
+}
+
+/// Update a food item WITHOUT triggering cascade recalculation
+/// Used during batch updates - cascade happens once at the end
+pub fn update_food_item_no_cascade(
+    db: &Database,
+    id: i64,
+    data: FoodItemUpdate,
+) -> Result<UpdateFoodItemNoCascadeResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let updated = FoodItem::update(&conn, id, &data)
+        .map_err(|e| format!("Failed to update food item: {}", e))?;
+
+    match updated {
+        Some(item) => {
+            Ok(UpdateFoodItemNoCascadeResponse {
+                success: true,
+                updated_at: item.updated_at,
+                cascade_deferred: true,
+            })
+        }
+        None => Err(format!("Food item not found with id: {}", id)),
+    }
+}
+
+/// Response for batch cascade recalculation
+#[derive(Debug, Serialize)]
+pub struct BatchCascadeResponse {
+    pub success: bool,
+    pub food_items_processed: i64,
+    pub recipes_recalculated: i64,
+    pub days_recalculated: i64,
+}
+
+/// Perform cascade recalculation for multiple food items at once
+/// Much more efficient than individual cascades when updating many items
+pub fn batch_cascade_recalculate(
+    db: &Database,
+    food_item_ids: &std::collections::HashSet<i64>,
+) -> Result<BatchCascadeResponse, String> {
+    use std::collections::HashSet;
+    use crate::models::{recalculate_recipe_nutrition, recalculate_day_nutrition};
+
+    if food_item_ids.is_empty() {
+        return Ok(BatchCascadeResponse {
+            success: true,
+            food_items_processed: 0,
+            recipes_recalculated: 0,
+            days_recalculated: 0,
+        });
+    }
+
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Step 1: Find ALL recipes using ANY of the changed food items
+    let food_ids_str = food_item_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let direct_recipe_ids: Vec<i64> = {
+        let sql = format!(
+            "SELECT DISTINCT recipe_id FROM recipe_ingredients WHERE food_item_id IN ({})",
+            food_ids_str
+        );
+        let mut stmt = conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare query: {}", e))?;
+        let rows = stmt.query_map([], |row| row.get(0))
+            .map_err(|e| format!("Failed to query recipes: {}", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect recipe IDs: {}", e))?
+    };
+
+    if direct_recipe_ids.is_empty() {
+        return Ok(BatchCascadeResponse {
+            success: true,
+            food_items_processed: food_item_ids.len() as i64,
+            recipes_recalculated: 0,
+            days_recalculated: 0,
+        });
+    }
+
+    // Step 2: Expand to include parent recipes (that use affected recipes as components)
+    let mut all_affected: HashSet<i64> = HashSet::new();
+    let mut to_process: Vec<i64> = direct_recipe_ids;
+
+    while let Some(recipe_id) = to_process.pop() {
+        if all_affected.insert(recipe_id) {
+            let parent_ids: Vec<i64> = {
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT recipe_id FROM recipe_components WHERE component_recipe_id = ?1"
+                ).map_err(|e| format!("Failed to prepare parent query: {}", e))?;
+                let rows = stmt.query_map([recipe_id], |row| row.get(0))
+                    .map_err(|e| format!("Failed to query parents: {}", e))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("Failed to collect parent IDs: {}", e))?
+            };
+            to_process.extend(parent_ids);
+        }
+    }
+
+    // Step 3: Topologically sort recipes (dependencies first)
+    let sorted_recipes = topological_sort_recipes_for_batch(&conn, &all_affected)
+        .map_err(|e| format!("Failed to sort recipes: {}", e))?;
+
+    // Step 4: Recalculate all affected recipes
+    let mut recipes_recalculated = 0i64;
+    for recipe_id in &sorted_recipes {
+        recalculate_recipe_nutrition(&conn, *recipe_id)
+            .map_err(|e| format!("Failed to recalculate recipe {}: {}", recipe_id, e))?;
+        recipes_recalculated += 1;
+    }
+
+    // Step 5: Find all days with meal entries using affected recipes OR changed food items
+    let recipe_ids_str = sorted_recipes
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let affected_day_ids: Vec<i64> = {
+        let sql = format!(
+            "SELECT DISTINCT day_id FROM meal_entries WHERE recipe_id IN ({}) OR food_item_id IN ({})",
+            if recipe_ids_str.is_empty() { "-1".to_string() } else { recipe_ids_str },
+            food_ids_str
+        );
+        let mut stmt = conn.prepare(&sql)
+            .map_err(|e| format!("Failed to prepare day query: {}", e))?;
+        let rows = stmt.query_map([], |row| row.get(0))
+            .map_err(|e| format!("Failed to query days: {}", e))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect day IDs: {}", e))?
+    };
+
+    // Step 6: Recalculate all affected days
+    let mut days_recalculated = 0i64;
+    for day_id in affected_day_ids {
+        recalculate_day_nutrition(&conn, day_id)
+            .map_err(|e| format!("Failed to recalculate day {}: {}", day_id, e))?;
+        days_recalculated += 1;
+    }
+
+    Ok(BatchCascadeResponse {
+        success: true,
+        food_items_processed: food_item_ids.len() as i64,
+        recipes_recalculated,
+        days_recalculated,
+    })
+}
+
+/// Topological sort for batch cascade (same logic as in recipe_ingredient.rs)
+fn topological_sort_recipes_for_batch(
+    conn: &rusqlite::Connection,
+    recipe_ids: &std::collections::HashSet<i64>,
+) -> Result<Vec<i64>, String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    if recipe_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut dependencies: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut dependents: HashMap<i64, HashSet<i64>> = HashMap::new();
+
+    for &recipe_id in recipe_ids {
+        dependencies.entry(recipe_id).or_default();
+        dependents.entry(recipe_id).or_default();
+    }
+
+    let ids_str = recipe_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let sql = format!(
+        "SELECT recipe_id, component_recipe_id FROM recipe_components
+         WHERE recipe_id IN ({}) AND component_recipe_id IN ({})",
+        ids_str, ids_str
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let edges: Vec<(i64, i64)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    for (parent_id, child_id) in edges {
+        dependencies.entry(parent_id).or_default().insert(child_id);
+        dependents.entry(child_id).or_default().insert(parent_id);
+    }
+
+    let mut result = Vec::new();
+    let mut queue: VecDeque<i64> = VecDeque::new();
+
+    for &recipe_id in recipe_ids {
+        if dependencies.get(&recipe_id).map_or(true, |d| d.is_empty()) {
+            queue.push_back(recipe_id);
+        }
+    }
+
+    while let Some(recipe_id) = queue.pop_front() {
+        result.push(recipe_id);
+
+        if let Some(parents) = dependents.get(&recipe_id).cloned() {
+            for parent_id in parents {
+                if let Some(deps) = dependencies.get_mut(&parent_id) {
+                    deps.remove(&recipe_id);
+                    if deps.is_empty() {
+                        queue.push_back(parent_id);
+                    }
+                }
+            }
+        }
+    }
+
+    if result.len() != recipe_ids.len() {
+        let missing: Vec<i64> = recipe_ids
+            .iter()
+            .copied()
+            .filter(|id| !result.contains(id))
+            .collect();
+        result.extend(missing);
+    }
+
+    Ok(result)
+}
+
 /// List food items with zero uses (not used in any recipe or meal entry)
 /// These food items are safe to delete
 pub fn list_unused_food_items(db: &Database) -> Result<ListUnusedFoodItemsResponse, String> {

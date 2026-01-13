@@ -2,6 +2,7 @@
 //!
 //! Implements the MCP server with all UHM tools.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use rmcp::model::{
     CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::db::Database;
@@ -28,12 +29,23 @@ use crate::tools::recipes;
 use crate::tools::status::StatusTracker;
 use crate::tools::vitals;
 
+/// Batch update state for efficient bulk food item updates
+#[derive(Default)]
+struct BatchUpdateState {
+    /// Whether batch mode is active
+    active: bool,
+    /// Food item IDs that have been modified during this batch
+    changed_food_item_ids: HashSet<i64>,
+}
+
 /// UHM MCP Service
 #[derive(Clone)]
 pub struct UhmService {
     status_tracker: Arc<Mutex<StatusTracker>>,
     database: Database,
     tool_router: ToolRouter<UhmService>,
+    /// Batch update state for efficient bulk operations
+    batch_state: Arc<std::sync::Mutex<BatchUpdateState>>,
 }
 
 impl UhmService {
@@ -42,8 +54,29 @@ impl UhmService {
             status_tracker: Arc::new(Mutex::new(StatusTracker::new(database_path))),
             database,
             tool_router: Self::tool_router(),
+            batch_state: Arc::new(std::sync::Mutex::new(BatchUpdateState::default())),
         }
     }
+}
+
+// ============================================================================
+// Batch Update Response Structs
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+struct StartBatchUpdateResponse {
+    success: bool,
+    message: String,
+    pending_items: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct FinishBatchUpdateResponse {
+    success: bool,
+    message: String,
+    food_items_processed: i64,
+    recipes_recalculated: i64,
+    days_recalculated: i64,
 }
 
 // ============================================================================
@@ -682,7 +715,7 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Update a food item. Automatically recalculates nutrition for any recipes using this item.")]
+    #[tool(description = "Update a food item. Automatically recalculates nutrition for any recipes using this item (unless batch mode is active).")]
     fn update_food_item(&self, Parameters(p): Parameters<UpdateFoodItemParams>) -> Result<CallToolResult, McpError> {
         let data = FoodItemUpdate {
             name: p.name, brand: p.brand, serving_size: p.serving_size, serving_unit: p.serving_unit,
@@ -691,9 +724,35 @@ impl UhmService {
             cholesterol: p.cholesterol, preference: p.preference.map(|s| Preference::from_str(&s)), notes: p.notes,
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
         };
-        let result = food_items::update_food_item(&self.database, p.id, data).map_err(|e| McpError::internal_error(e, None))?;
-        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+
+        // Check if batch mode is active
+        let batch_active = {
+            let state = self.batch_state.lock().unwrap();
+            state.active
+        };
+
+        if batch_active {
+            // Batch mode: update without cascade, record the ID
+            let result = food_items::update_food_item_no_cascade(&self.database, p.id, data)
+                .map_err(|e| McpError::internal_error(e, None))?;
+
+            // Record this food item ID for later cascade
+            {
+                let mut state = self.batch_state.lock().unwrap();
+                state.changed_food_item_ids.insert(p.id);
+            }
+
+            let json = serde_json::to_string_pretty(&result)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        } else {
+            // Normal mode: update with immediate cascade
+            let result = food_items::update_food_item(&self.database, p.id, data)
+                .map_err(|e| McpError::internal_error(e, None))?;
+            let json = serde_json::to_string_pretty(&result)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        }
     }
 
     #[tool(description = "Delete a food item (only allowed if not used in any recipes)")]
@@ -703,6 +762,78 @@ impl UhmService {
             Ok(success) => serde_json::to_string_pretty(&success),
             Err(blocked) => serde_json::to_string_pretty(&blocked),
         }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // --- Batch Update Tools ---
+
+    #[tool(description = "Start batch update mode. While active, update_food_item will skip cascade recalculation. Call finish_batch_update when done to perform one combined cascade for all changed items. Use this when updating many food items to avoid performance issues.")]
+    fn start_batch_update(&self) -> Result<CallToolResult, McpError> {
+        let mut state = self.batch_state.lock().unwrap();
+
+        if state.active {
+            // Already in batch mode - return current state
+            let response = StartBatchUpdateResponse {
+                success: true,
+                message: "Batch mode was already active".to_string(),
+                pending_items: state.changed_food_item_ids.len() as i64,
+            };
+            let json = serde_json::to_string_pretty(&response)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            return Ok(CallToolResult::success(vec![Content::text(json)]));
+        }
+
+        // Start batch mode
+        state.active = true;
+        state.changed_food_item_ids.clear();
+
+        let response = StartBatchUpdateResponse {
+            success: true,
+            message: "Batch mode started. update_food_item calls will now defer cascade recalculation.".to_string(),
+            pending_items: 0,
+        };
+        let json = serde_json::to_string_pretty(&response)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Finish batch update mode and perform combined cascade recalculation for all food items that were updated. This is much more efficient than individual cascades when updating many items.")]
+    fn finish_batch_update(&self) -> Result<CallToolResult, McpError> {
+        // Get the changed IDs and clear state
+        let changed_ids = {
+            let mut state = self.batch_state.lock().unwrap();
+
+            if !state.active {
+                let response = FinishBatchUpdateResponse {
+                    success: false,
+                    message: "Batch mode was not active".to_string(),
+                    food_items_processed: 0,
+                    recipes_recalculated: 0,
+                    days_recalculated: 0,
+                };
+                let json = serde_json::to_string_pretty(&response)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                return Ok(CallToolResult::success(vec![Content::text(json)]));
+            }
+
+            // End batch mode and take the IDs
+            state.active = false;
+            std::mem::take(&mut state.changed_food_item_ids)
+        };
+
+        // Perform the combined cascade
+        let result = food_items::batch_cascade_recalculate(&self.database, &changed_ids)
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let response = FinishBatchUpdateResponse {
+            success: true,
+            message: "Batch update completed successfully".to_string(),
+            food_items_processed: result.food_items_processed,
+            recipes_recalculated: result.recipes_recalculated,
+            days_recalculated: result.days_recalculated,
+        };
+        let json = serde_json::to_string_pretty(&response)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
