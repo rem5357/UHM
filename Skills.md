@@ -144,6 +144,27 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/nutrition/converter.rs` - Unit parsing and conversion functions
   - `src/db/migrations.rs` - Migration v5 with auto-migration of existing data
 
+### Phase 12: Batch Update Mode
+- **Purpose**: Efficient bulk food item updates without performance degradation
+- **Problem Solved**: Updating 50 food items caused 50 cascade recalculations of the same recipes, leading to slowdowns/crashes
+- **New Tools**:
+  - `start_batch_update` - Enter batch mode, defer cascade recalculations
+  - `finish_batch_update` - Perform ONE combined cascade for all changed items
+- **How It Works**:
+  1. Call `start_batch_update()` before bulk updates
+  2. Call `update_food_item()` normally - updates happen but cascade is deferred
+  3. Call `finish_batch_update()` to perform combined cascade
+- **Implementation**:
+  - `BatchUpdateState` struct tracks active mode and changed food item IDs
+  - `update_food_item` checks batch state, uses `update_food_item_no_cascade` if active
+  - `batch_cascade_recalculate()` processes all changed items efficiently
+  - Topological sort ensures recipes recalculated in correct dependency order
+- **Recovery**: If crash during batch mode, food item updates are saved - just call `finish_batch_update()`
+- **Files Modified**:
+  - `src/mcp/server.rs` - Batch state, new tools
+  - `src/tools/food_items.rs` - `update_food_item_no_cascade`, `batch_cascade_recalculate`
+  - `src/tools/status.rs` - Batch update documentation in meal_instructions
+
 ## Technology Stack
 
 ### Rust
