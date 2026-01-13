@@ -89,6 +89,64 @@ Most packages show nutrition "per serving" (e.g., "per 2 tbsp (32g)"). Convert t
 
 ---
 
+## Nutrition Data Sources
+
+### Primary Source: USDA FoodData Central
+
+**URL:** https://fdc.nal.usda.gov/
+
+**How to use:**
+1. Search for the food item (e.g., "chicken breast raw", "rolled oats", "banana")
+2. Look for **"Foundation Foods"** or **"SR Legacy"** data types - these are the most accurate analytical values
+3. Avoid "Branded Foods" unless specifically looking up a branded product
+4. Note the serving size and unit provided, then normalize to canonical units (per 100g for solids, per 100ml for liquids)
+
+**Data types in order of reliability:**
+1. **Foundation Foods** - Analytically derived, most accurate
+2. **SR Legacy** (Standard Reference) - USDA's historical reference database
+3. **FNDDS** - Food and Nutrient Database for Dietary Studies
+4. **Branded Foods** - Manufacturer-submitted data (use only for specific branded products)
+
+**Citation:** U.S. Department of Agriculture, Agricultural Research Service. FoodData Central, 2019. fdc.nal.usda.gov
+
+### Secondary Source: Harvard T.H. Chan School of Public Health
+
+**URL:** https://nutritionsource.hsph.harvard.edu/
+
+**How to use:**
+- Use for qualitative guidance about food categories (whole grains vs refined, healthy fats, etc.)
+- Use for context on why certain foods are healthy/unhealthy
+- **NOT a per-food nutritional database** - does not have specific calorie/macro values
+- Good for understanding food categories when classifying items
+
+**Useful pages:**
+- Food Features: https://nutritionsource.hsph.harvard.edu/food-features/
+- Healthy Eating Plate: https://nutritionsource.hsph.harvard.edu/healthy-eating-plate/
+
+### For Branded Products
+
+**Always prefer the actual product label over database lookups.** Label values are:
+- Required by FDA to be accurate within regulatory tolerances
+- Specific to the exact product formulation
+- Include the manufacturer's stated serving size (helpful for conversions like "1 scoop = 31g")
+
+### Workflow for Adding Food Items
+
+| Scenario | Data Source | Action |
+|----------|-------------|--------|
+| **Branded product with label** | Product label | Use label values directly, convert to per-100g/100ml |
+| **Generic food** (e.g., "chicken breast") | USDA FoodData Central | Use Foundation Foods or SR Legacy values |
+| **Unknown conversion** (e.g., "grams per cup of flour") | USDA FDC | Check "Portion" data for gram weights of common measures |
+
+**Example - Looking up "rolled oats":**
+1. Go to fdc.nal.usda.gov
+2. Search "rolled oats"
+3. Select the **Foundation Foods** or **SR Legacy** entry
+4. Find nutrition per 100g
+5. Store in UHM with `serving_size: 100, serving_unit: "g"`
+
+---
+
 ## CRITICAL: Recipe Ingredient Units
 
 **This is where most errors occur.** The UHM system does NOT automatically convert volume measurements (cups, tbsp, scoops) to grams. **Claude must perform this conversion manually when adding recipe ingredients.**
