@@ -630,7 +630,26 @@ fn bp_reading_exists(
             rusqlite::params![timestamp, systolic, diastolic],
             |row| row.get(0),
         )
-        .map_err(|e| format!("Failed to check for duplicates: {}", e))?;
+        .map_err(|e| format!("Failed to check for BP duplicates: {}", e))?;
+    Ok(count > 0)
+}
+
+/// Check if an HR reading already exists with matching timestamp and value
+fn hr_reading_exists(
+    conn: &rusqlite::Connection,
+    timestamp: &str,
+    pulse: f64,
+) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(*) FROM vitals
+               WHERE vital_type = 'heart_rate'
+               AND timestamp = ?1
+               AND value1 = ?2"#,
+            rusqlite::params![timestamp, pulse],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to check for HR duplicates: {}", e))?;
     Ok(count > 0)
 }
 
@@ -737,18 +756,29 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
             "single".to_string()
         };
 
-        // Check for duplicate reading (same timestamp + BP values)
-        match bp_reading_exists(&conn, &timestamp, systolic as f64, diastolic as f64) {
-            Ok(true) => {
-                duplicates += 1;
-                continue; // Skip duplicate
-            }
-            Ok(false) => {} // Not a duplicate, continue
+        // Check for duplicate reading (same timestamp + BP values OR same timestamp + HR value)
+        let bp_exists = match bp_reading_exists(&conn, &timestamp, systolic as f64, diastolic as f64) {
+            Ok(exists) => exists,
             Err(e) => {
                 errors.push(format!("Row {}: {}", line_num + 1, e));
                 skipped += 1;
                 continue;
             }
+        };
+
+        let hr_exists = match hr_reading_exists(&conn, &timestamp, pulse as f64) {
+            Ok(exists) => exists,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // If either BP or HR already exists, consider it a duplicate
+        if bp_exists || hr_exists {
+            duplicates += 1;
+            continue;
         }
 
         // Create vital group for this reading
