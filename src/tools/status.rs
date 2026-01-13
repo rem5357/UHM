@@ -24,6 +24,23 @@ To log a meal, you need:
 
 ---
 
+## Getting the Current Date
+
+**IMPORTANT:** When logging meals for "today" or any relative date, use the UCM (Universal Calendar Manager) MCP server to get accurate dates.
+
+**Tool:** `ucm_now`
+- Returns the current date and time in ISO format
+- Use the `date` field (YYYY-MM-DD) for meal logging
+
+**Example workflow:**
+1. User says "log my breakfast"
+2. Call `ucm_now` to get current date → returns `{"date": "2026-01-13", "time": "08:30:00", ...}`
+3. Use `"2026-01-13"` as the date parameter in `log_meal`
+
+**Why use UCM?** LLMs have limitations with temporal reasoning. UCM provides accurate, real-time date calculations. Always use `ucm_now` rather than guessing or assuming the current date.
+
+---
+
 ## MANDATORY Unit Standards for Food Items
 
 ALL food items MUST use one of these three standardized formats:
