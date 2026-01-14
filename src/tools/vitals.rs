@@ -446,9 +446,11 @@ pub fn get_latest_vitals(db: &Database) -> Result<LatestVitalsResponse, String> 
 pub fn update_vital(
     db: &Database,
     id: i64,
+    timestamp: Option<&str>,
     value1: Option<f64>,
     value2: Option<f64>,
     unit: Option<&str>,
+    group_id: Option<i64>,
     notes: Option<&str>,
 ) -> Result<Option<UpdateVitalResponse>, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
@@ -474,10 +476,11 @@ pub fn update_vital(
     }
 
     let data = VitalUpdate {
+        timestamp: timestamp.map(String::from),
         value1,
         value2,
         unit: unit.map(String::from),
-        group_id: None, // Use assign_vital_to_group for this
+        group_id,
         notes: notes.map(String::from),
     };
 

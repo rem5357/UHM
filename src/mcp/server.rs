@@ -656,12 +656,16 @@ pub struct ListVitalsByDateRangeParams {
 pub struct UpdateVitalParams {
     /// Vital ID
     pub id: i64,
+    /// New timestamp (ISO format, e.g., "2026-01-13T21:59:00")
+    pub timestamp: Option<String>,
     /// New primary value
     pub value1: Option<f64>,
     /// New secondary value (for blood pressure)
     pub value2: Option<f64>,
     /// New unit
     pub unit: Option<String>,
+    /// Vital group ID (use 0 or null to unlink from group)
+    pub group_id: Option<i64>,
     /// New notes
     pub notes: Option<String>,
 }
@@ -1615,9 +1619,9 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Update a vital reading's values or notes")]
+    #[tool(description = "Update a vital reading (timestamp, values, unit, group, notes)")]
     fn update_vital(&self, Parameters(p): Parameters<UpdateVitalParams>) -> Result<CallToolResult, McpError> {
-        let result = vitals::update_vital(&self.database, p.id, p.value1, p.value2, p.unit.as_deref(), p.notes.as_deref())
+        let result = vitals::update_vital(&self.database, p.id, p.timestamp.as_deref(), p.value1, p.value2, p.unit.as_deref(), p.group_id, p.notes.as_deref())
             .map_err(|e| McpError::internal_error(e, None))?;
         let json = match result {
             Some(resp) => serde_json::to_string_pretty(&resp),

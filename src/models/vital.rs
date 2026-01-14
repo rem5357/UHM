@@ -242,6 +242,7 @@ pub struct VitalCreate {
 /// Data for updating a vital
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VitalUpdate {
+    pub timestamp: Option<String>,
     pub value1: Option<f64>,
     pub value2: Option<f64>,
     pub unit: Option<String>,
@@ -393,6 +394,10 @@ impl Vital {
         let mut updates = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
+        if let Some(ref ts) = data.timestamp {
+            updates.push(format!("timestamp = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(ts.clone()));
+        }
         if let Some(v1) = data.value1 {
             updates.push(format!("value1 = ?{}", params_vec.len() + 1));
             params_vec.push(Box::new(v1));
