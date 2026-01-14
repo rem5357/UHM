@@ -622,31 +622,34 @@ fn calculate_calories_burned(
     // Convert weight to kg
     let weight_kg = weight_lbs * 0.453592;
 
-    // Base MET values for treadmill (approximations)
+    // Base MET values from Compendium of Physical Activities
+    // https://sites.google.com/site/compendiumofphysicalactivities/
     let base_met = if speed < 2.0 {
         2.0 // Very slow walking
     } else if speed < 2.5 {
-        2.5
+        2.8 // 2.0 mph
     } else if speed < 3.0 {
-        3.0
+        3.0 // 2.5 mph
     } else if speed < 3.5 {
-        3.5
+        3.5 // 3.0 mph
     } else if speed < 4.0 {
-        4.3
+        4.3 // 3.5 mph
     } else if speed < 4.5 {
-        5.0
+        5.0 // 4.0 mph (brisk walk)
     } else if speed < 5.0 {
-        6.0
+        7.0 // 4.5 mph (very brisk / light jog)
     } else if speed < 5.5 {
-        8.3
+        8.3 // 5.0 mph (jogging)
     } else if speed < 6.0 {
-        9.0
+        9.0 // 5.5 mph
     } else if speed < 7.0 {
-        9.8
+        9.8 // 6.0 mph (running)
     } else if speed < 8.0 {
-        10.5
+        10.5 // 7.0 mph
+    } else if speed < 9.0 {
+        11.5 // 8.0 mph
     } else {
-        11.5
+        12.8 // 9.0+ mph
     };
 
     // Add incline adjustment (~0.1 MET per 1% grade at walking speeds)
