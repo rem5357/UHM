@@ -700,7 +700,7 @@ pub struct ListVitalsStatsParams {
 pub struct FindDuplicateVitalsParams {
     /// Vital type to check (optional, defaults to blood_pressure and heart_rate)
     pub vital_type: Option<String>,
-    /// Time window in minutes to consider readings as potential duplicates (default: 60)
+    /// Time window in minutes to consider readings as potential duplicates (default: 1440 = 24 hours)
     pub time_window_minutes: Option<i64>,
 }
 

@@ -845,8 +845,8 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
     };
 
     // Auto-cleanup: delete standalone vitals that duplicate exercise-linked vitals
-    // Use 60 minute window to match readings that might have slight timestamp differences
-    let cleanup_result = auto_cleanup_exercise_duplicates(&conn, 60)
+    // Use 24 hour window - exact value matches on the same day are almost certainly duplicates
+    let cleanup_result = auto_cleanup_exercise_duplicates(&conn, 1440)
         .unwrap_or_default();
 
     Ok(OmronImportResponse {
@@ -1404,7 +1404,7 @@ pub fn find_duplicate_vitals(
     time_window_minutes: Option<i64>,
 ) -> Result<FindDuplicateVitalsResponse, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
-    let window = time_window_minutes.unwrap_or(60); // Default 60 minute window
+    let window = time_window_minutes.unwrap_or(1440); // Default 24 hour window (same day)
 
     // Filter by vital type if specified (default to BP and HR which are most common with exercises)
     let type_filter = match vital_type {
