@@ -685,6 +685,16 @@ pub struct ImportOmronBpCsvParams {
     pub file_path: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListVitalsStatsParams {
+    /// Vital type: weight, blood_pressure (bp), heart_rate (hr), oxygen_saturation (o2/spo2), glucose
+    pub vital_type: String,
+    /// Start date (inclusive) - optional, defaults to all time
+    pub start_date: Option<String>,
+    /// End date (inclusive) - optional, defaults to all time
+    pub end_date: Option<String>,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -1394,6 +1404,14 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(description = "Get comprehensive statistics for vitals by type. Returns mean, median, mode, standard deviation, min, max, percentiles, and outliers. For blood pressure, includes systolic, diastolic, and pulse pressure stats. Much faster than processing raw data externally.")]
+    fn list_vitals_stats(&self, Parameters(p): Parameters<ListVitalsStatsParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::list_vitals_stats(&self.database, &p.vital_type, p.start_date.as_deref(), p.end_date.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ============================================================================
@@ -1425,7 +1443,8 @@ impl ServerHandler for UhmService {
                  Medications: add/get/list/search/update/deprecate/reactivate/delete_medication, export_medications_markdown. \
                  For medication dosage changes: deprecate old entry and add new one to preserve history. \
                  update/delete_medication require force=true. \
-                 Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals. \
+                 Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals, list_vitals_stats. \
+                 list_vitals_stats: Get comprehensive vital statistics by type (mean, median, mode, SD, outliers, etc.) - much faster than processing raw data. \
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),

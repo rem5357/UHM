@@ -1054,6 +1054,7 @@ You can use these shortcuts when specifying vital_type:
 | List recent | `list_recent_vitals` |
 | List by date range | `list_vitals_by_date_range` |
 | Get latest of each type | `get_latest_vitals` |
+| Get statistics by type | `list_vitals_stats` |
 | Create group | `create_vital_group` |
 | View group with vitals | `get_vital_group` |
 | List groups | `list_vital_groups` |
@@ -1098,6 +1099,44 @@ list_vitals_by_date_range(
   vital_type: "blood_pressure"  // optional filter
 )
 ```
+
+### Analyze Vital Trends with Statistics
+Use `list_vitals_stats` to get comprehensive statistics for any vital type:
+```
+list_vitals_stats(
+  vital_type: "blood_pressure",
+  start_date: "2026-01-01",  // optional
+  end_date: "2026-01-31"     // optional
+)
+```
+
+**Statistics returned for all vital types:**
+- **count** - Number of readings
+- **average** - Mean value
+- **median** - Middle value (less affected by outliers)
+- **mode** - Most common value
+- **standard_deviation** - Variability measure
+- **min / max / range** - Lowest, highest, and spread
+- **percentile_25 / percentile_75 / iqr** - Quartiles and interquartile range
+- **coefficient_of_variation** - Relative variability (SD/mean × 100)
+- **outliers** - Readings outside 1 standard deviation (with timestamp, value, z-score)
+
+**Type-specific extras:**
+
+| Vital Type | Additional Stats |
+|------------|-----------------|
+| **weight** | total_change, avg_change_per_reading |
+| **blood_pressure** | Separate stats for systolic, diastolic, and pulse_pressure |
+| **oxygen_saturation** | below_95_count, below_90_count (concerning readings) |
+| **glucose** | low_count (<70), high_count (>180) |
+
+**Example use cases:**
+- "What's my average blood pressure this month?"
+- "Which readings were unusually high or low?"
+- "How much has my weight changed?"
+- "How consistent is my heart rate?"
+
+**Why use this?** Much faster than fetching raw data and calculating in Claude Desktop. A single tool call returns all statistics instantly.
 
 ## Notes
 
