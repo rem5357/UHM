@@ -758,6 +758,8 @@ pub struct ListExercisesForDayParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UpdateExerciseParams {
     pub id: i64,
+    /// Exercise start timestamp (ISO format, e.g., "2026-01-13T21:59:00")
+    pub timestamp: Option<String>,
     /// Vital group ID for PRE-exercise readings
     pub pre_vital_group_id: Option<i64>,
     /// Vital group ID for POST-exercise readings
@@ -1432,11 +1434,12 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Update an exercise session (notes, vital group links)")]
+    #[tool(description = "Update an exercise session (timestamp, notes, vital group links)")]
     fn update_exercise(&self, Parameters(p): Parameters<UpdateExerciseParams>) -> Result<CallToolResult, McpError> {
         let result = exercise::update_exercise(
             &self.database,
             p.id,
+            p.timestamp.as_deref(),
             p.pre_vital_group_id,
             p.post_vital_group_id,
             p.notes.as_deref(),

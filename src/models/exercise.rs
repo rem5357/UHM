@@ -97,6 +97,7 @@ pub struct ExerciseCreate {
 /// Data for updating an exercise
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExerciseUpdate {
+    pub timestamp: Option<String>,
     pub pre_vital_group_id: Option<i64>,
     pub post_vital_group_id: Option<i64>,
     pub notes: Option<String>,
@@ -220,6 +221,10 @@ impl Exercise {
         let mut updates = Vec::new();
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
+        if let Some(ref ts) = data.timestamp {
+            updates.push(format!("timestamp = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(ts.clone()));
+        }
         if let Some(pre_id) = data.pre_vital_group_id {
             updates.push(format!("pre_vital_group_id = ?{}", params_vec.len() + 1));
             params_vec.push(Box::new(pre_id));

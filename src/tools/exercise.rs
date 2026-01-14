@@ -331,6 +331,7 @@ pub fn list_exercises_for_day(db: &Database, date: &str) -> Result<ListExercises
 pub fn update_exercise(
     db: &Database,
     id: i64,
+    timestamp: Option<&str>,
     pre_vital_group_id: Option<i64>,
     post_vital_group_id: Option<i64>,
     notes: Option<&str>,
@@ -354,6 +355,7 @@ pub fn update_exercise(
     }
 
     let data = ExerciseUpdate {
+        timestamp: timestamp.map(String::from),
         pre_vital_group_id,
         post_vital_group_id,
         notes: notes.map(String::from),
