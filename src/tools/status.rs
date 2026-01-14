@@ -41,6 +41,26 @@ To log a meal, you need:
 
 ---
 
+## The 80% Rule for Nutrition Ranges
+
+When a nutrition source provides a **range** instead of a single value, use this formula:
+
+**Final Value = Low Value + (80% × Difference)**
+
+### Example
+- Source says: "500-600 calories"
+- Calculation: 500 + (0.80 × 100) = **580 calories**
+
+### Why 80%?
+- Manufacturers often underestimate actual values
+- The high end may represent worst-case scenarios
+- 80% provides a realistic estimate without over-counting
+
+### Apply to ALL nutrition fields with ranges:
+- Calories, protein, fat, carbs, fiber, sugar, sodium, etc.
+
+---
+
 ## MANDATORY Unit Standards for Food Items
 
 ALL food items MUST use one of these three standardized formats:
