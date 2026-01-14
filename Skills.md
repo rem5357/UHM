@@ -252,6 +252,30 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/status.rs` - EXERCISE_INSTRUCTIONS
   - `src/mcp/server.rs` - Tool registrations
 
+### Phase 16: Duplicate Vitals Detection
+- **Purpose**: Identify and clean up duplicate vital readings between exercise-linked and standalone entries
+- **Problem Solved**: When entering BP during exercise tracking, readings may be entered both as part of exercise PRE/POST vital groups AND as standalone vitals, causing duplicates
+- **New Tools**:
+  - `find_duplicate_vitals` - Finds potential duplicates by matching:
+    - Same vital type (BP with BP, HR with HR)
+    - Same values (systolic/diastolic for BP, bpm for HR)
+    - Timestamps within configurable window (default: 60 minutes)
+  - `delete_vitals_bulk` - Delete multiple vitals by ID for confirmed duplicate removal
+- **How It Works**:
+  1. Queries all vitals in exercise-linked vital groups (PRE/POST)
+  2. Queries all standalone vitals (not in exercise groups)
+  3. Compares and reports pairs where values match within time window
+  4. Returns exercise_vital (to keep) and standalone_vital (candidate for deletion)
+- **Usage**:
+  ```
+  1. Call find_duplicate_vitals() to scan for duplicates
+  2. Review pairs - exercise_vital is usually the one to keep
+  3. Call delete_vitals_bulk([ids]) to remove confirmed duplicates
+  ```
+- **Files Modified**:
+  - `src/tools/vitals.rs` - find_duplicate_vitals, delete_vitals_bulk functions
+  - `src/mcp/server.rs` - Tool registrations and params
+
 ## Technology Stack
 
 ### Rust
@@ -316,6 +340,17 @@ Build number starts at 0 and increments to 1 on first build. Each source change 
 - Server runs as stdio subprocess
 - Tools appear automatically in Claude's interface after restart
 
+### File Path Cross-Platform Issues
+- **Problem**: Claude Desktop may run in a different environment (WSL, Docker, or different temp directories) than the UHM MCP server (native Windows)
+- **Symptoms**: File paths like `/tmp/file.csv` don't work because UHM runs on Windows and expects paths like `D:\path\file.csv`
+- **Solution**: When using file import tools, ensure the file is placed in a Windows-accessible path that UHM can reach
+- **Example**: Copy CSV to `D:\Projects\UHM\data\import.csv` before calling `import_omron_bp_csv`
+
+### Duplicate Data Prevention
+- **Problem**: When tracking exercise with PRE/POST vitals, the same readings can accidentally be entered both as exercise-linked groups AND standalone vitals
+- **Solution**: Use `find_duplicate_vitals` to scan for matches and `delete_vitals_bulk` to clean up
+- **Best Practice**: Going forward, announce exercise time explicitly so timestamps align properly
+
 ## Project Structure
 
 ```
@@ -361,6 +396,13 @@ D:\Projects\UHM\
 ```
 
 ## Todo / Future Work
+
+### To Resolve (Known Issues)
+- [ ] **Omron CSV Import Path Issue**: `import_omron_bp_csv` fails when Claude Desktop passes non-Windows paths (e.g., `/tmp/file.csv`). UHM runs on Windows and can't access Linux-style paths. Potential fixes:
+  - Add path validation/conversion in the import tool
+  - Have the tool accept file content as base64 instead of file path
+  - Document workaround: copy file to Windows-accessible path first
+  - Investigate if Claude Desktop can be configured to use Windows temp paths
 
 ### Pending Implementation
 - [ ] Unit conversion utilities (grams ↔ oz, ml ↔ cups, etc.)
