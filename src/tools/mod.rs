@@ -3,6 +3,7 @@
 //! MCP tool implementations for the Universal Health Manager.
 
 pub mod days;
+pub mod exercise;
 pub mod food_items;
 pub mod medications;
 pub mod recipes;

@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -53,6 +53,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 5 {
         migrate_v5(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (5)", [])?;
+    }
+
+    if current_version < 6 {
+        migrate_v6(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
     }
 
     Ok(())
@@ -462,6 +467,85 @@ fn migrate_existing_food_items(conn: &Connection) -> DbResult<()> {
             id
         ])?;
     }
+
+    Ok(())
+}
+
+/// Migration v6: Exercise tracking
+fn migrate_v6(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- EXERCISES
+        -- Workout sessions (e.g., treadmill session)
+        -- ============================================
+        CREATE TABLE exercises (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_id INTEGER NOT NULL REFERENCES days(id) ON DELETE CASCADE,
+            exercise_type TEXT NOT NULL CHECK(exercise_type IN ('treadmill')),
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+
+            -- Cached totals (recalculated when segments change)
+            cached_duration_minutes REAL NOT NULL DEFAULT 0,
+            cached_distance_miles REAL NOT NULL DEFAULT 0,
+            cached_calories_burned REAL NOT NULL DEFAULT 0,
+
+            -- Link to vital groups for PRE/POST readings
+            pre_vital_group_id INTEGER REFERENCES vital_groups(id),
+            post_vital_group_id INTEGER REFERENCES vital_groups(id),
+
+            -- Metadata
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_exercises_day ON exercises(day_id);
+        CREATE INDEX idx_exercises_type ON exercises(exercise_type);
+        CREATE INDEX idx_exercises_timestamp ON exercises(timestamp);
+
+        -- ============================================
+        -- EXERCISE SEGMENTS
+        -- Individual segments within a workout
+        -- (e.g., 15 min at 2.3 mph, then 15 min at 2.5 mph)
+        -- ============================================
+        CREATE TABLE exercise_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE CASCADE,
+            segment_order INTEGER NOT NULL DEFAULT 1,
+
+            -- Treadmill metrics (2 of 3 required: duration, speed, distance)
+            duration_minutes REAL,          -- time in minutes
+            speed_mph REAL,                 -- speed in mph
+            distance_miles REAL,            -- distance in miles
+            incline_percent REAL NOT NULL DEFAULT 0,
+
+            -- Calculation metadata
+            calculated_field TEXT CHECK(calculated_field IN ('duration', 'speed', 'distance', 'none')),
+            is_consistent INTEGER NOT NULL DEFAULT 1,  -- 1 if values match, 0 if inconsistent
+
+            -- Calculated values
+            calories_burned REAL NOT NULL DEFAULT 0,
+            weight_used_lbs REAL,           -- weight used for calorie calculation
+
+            -- Optional metrics
+            avg_heart_rate REAL,
+
+            -- Metadata
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX idx_exercise_segments_exercise ON exercise_segments(exercise_id);
+        CREATE INDEX idx_exercise_segments_order ON exercise_segments(exercise_id, segment_order);
+
+        -- ============================================
+        -- Add cached exercise calories to days
+        -- ============================================
+        ALTER TABLE days ADD COLUMN cached_calories_burned REAL NOT NULL DEFAULT 0;
+        "#,
+    )?;
 
     Ok(())
 }

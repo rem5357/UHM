@@ -193,21 +193,64 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/mcp/server.rs` - Tool registration
   - `src/tools/status.rs` - Updated meal_instructions
 
-### Phase 14: Omron BP Import
-- **Purpose**: Batch import blood pressure and heart rate data from Omron CSV exports
-- **Tool**: `import_omron_bp_csv`
-- **Input**: Full file path to Omron CSV export
-- **CSV Format**: Date, Time, Systolic (mmHg), Diastolic (mmHg), Pulse (bpm), Symptoms, Consumed, TruRead, Notes
-- **Processing**:
-  - Parses Omron date format ("Jan 6 2026") and time format ("8:18 am")
-  - Creates a vital group for each reading
-  - Adds BP vital (systolic/diastolic) linked to group
-  - Adds HR vital (pulse) linked to group
-  - Captures TruRead/Average status in group notes
-- **Response**: Summary with imported count, skipped count, errors, date range
+### Phase 14: Omron BP Import & Statistics Tools
+- **Purpose**: Batch import blood pressure data + comprehensive statistics for all data types
+- **Omron Import Tool**: `import_omron_bp_csv`
+  - Input: Full file path to Omron CSV export
+  - CSV Format: Date, Time, Systolic, Diastolic, Pulse, Symptoms, Consumed, TruRead, Notes
+  - Creates vital groups linking BP + HR readings
+  - Handles duplicates gracefully (skips if same timestamp + values exist)
+- **Statistics Tools**:
+  - `list_days_stats` - Nutrition statistics across logged days
+  - `list_vitals_stats` - Vital sign statistics by type
+- **Statistics Returned** (for each metric):
+  - count, sum, average, median, mode
+  - standard_deviation, variance
+  - min, max, range
+  - percentile_25, percentile_75, iqr
+  - coefficient_of_variation
+  - outliers (values outside 1 SD with z-scores)
+- **Vital-Specific Stats**:
+  - Weight: total_change, avg_change_per_reading
+  - Blood Pressure: separate stats for systolic, diastolic, pulse_pressure
+  - Oxygen Saturation: below_95_count, below_90_count
+  - Glucose: low_count (<70), high_count (>180)
+
+### Phase 15: Exercise Tracking
+- **Purpose**: Track treadmill workouts with automatic calorie calculation
+- **Database Schema** (Migration v6):
+  - `exercises` - Workout sessions linked to days
+  - `exercise_segments` - Individual segments with different settings
+  - `days.cached_calories_burned` - Daily exercise calorie total
+- **Exercise Tools**:
+  - `add_exercise` - Create exercise session for a day
+  - `get_exercise` - Get exercise with all segments
+  - `list_exercises` - List with optional date range filter
+  - `list_exercises_for_day` - List exercises for a specific day
+  - `update_exercise` - Update notes, link vital groups
+  - `delete_exercise` - Delete exercise and all segments
+  - `add_exercise_segment` - Add segment (provide 2 of 3: duration, speed, distance)
+  - `update_exercise_segment` - Update segment values
+  - `delete_exercise_segment` - Delete a segment
+  - `list_exercise_stats` - Exercise statistics (duration, distance, calories, speed, incline)
+  - `exercise_instructions` - Instructions for AI assistants
+- **Key Features**:
+  - **Auto-calculation**: Given 2 of (duration, speed, distance), calculates 3rd
+  - **Consistency check**: If all 3 provided, verifies they match (flags if inconsistent)
+  - **Calorie calculation**: Uses MET formula with latest weight from vitals
+  - **MET values**: Vary by speed (2.0 mph = 2.0 MET → 6.0 mph = 9.0 MET)
+  - **Incline adjustment**: Adds ~0.1 MET per 1% grade
+  - **Vital group linking**: Link PRE and POST exercise BP/HR for recovery tracking
+- **Integration with Days**:
+  - `get_day` now includes exercises and net_calories (consumed - burned)
+  - Day totals update automatically when exercises change
 - **Files Modified**:
-  - `src/tools/vitals.rs` - `import_omron_bp_csv`, date/time parsing
-  - `src/mcp/server.rs` - Tool registration
+  - `src/db/migrations.rs` - Migration v6
+  - `src/models/exercise.rs` - Exercise and ExerciseSegment models
+  - `src/tools/exercise.rs` - Exercise tool functions
+  - `src/tools/days.rs` - Updated get_day to include exercises
+  - `src/tools/status.rs` - EXERCISE_INSTRUCTIONS
+  - `src/mcp/server.rs` - Tool registrations
 
 ## Technology Stack
 
@@ -299,15 +342,17 @@ D:\Projects\UHM\
 │   │   ├── day.rs          # Day CRUD
 │   │   ├── meal_entry.rs   # MealEntry CRUD + day nutrition calc
 │   │   ├── medication.rs   # Medication CRUD
-│   │   └── vital.rs        # Vital and VitalGroup CRUD
+│   │   ├── vital.rs        # Vital and VitalGroup CRUD
+│   │   └── exercise.rs     # Exercise and ExerciseSegment CRUD
 │   ├── tools/
 │   │   ├── mod.rs
 │   │   ├── status.rs       # uhm_status implementation + instructions
 │   │   ├── food_items.rs   # Food item tool functions
 │   │   ├── recipes.rs      # Recipe tool functions
-│   │   ├── days.rs         # Day and meal entry tool functions
+│   │   ├── days.rs         # Day and meal entry tool functions + stats
 │   │   ├── medications.rs  # Medication tool functions
-│   │   └── vitals.rs       # Vital tool functions
+│   │   ├── vitals.rs       # Vital tool functions + stats
+│   │   └── exercise.rs     # Exercise tool functions + stats
 │   └── mcp/
 │       ├── mod.rs
 │       └── server.rs       # MCP server, all tool definitions

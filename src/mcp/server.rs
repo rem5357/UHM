@@ -23,6 +23,7 @@ use crate::models::{
     MedicationCreate, MedicationUpdate, MedType, DosageUnit,
 };
 use crate::tools::days;
+use crate::tools::exercise;
 use crate::tools::food_items;
 use crate::tools::medications;
 use crate::tools::recipes;
@@ -696,6 +697,115 @@ pub struct ListVitalsStatsParams {
 }
 
 // ============================================================================
+// Exercise Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddExerciseParams {
+    /// Date in ISO format (YYYY-MM-DD)
+    pub date: String,
+    /// Exercise type: treadmill (tm)
+    #[serde(default = "default_exercise_type")]
+    pub exercise_type: String,
+    /// Timestamp (defaults to current time)
+    pub timestamp: Option<String>,
+    /// Vital group ID for PRE-exercise readings (e.g., BP/HR before workout)
+    pub pre_vital_group_id: Option<i64>,
+    /// Vital group ID for POST-exercise readings (e.g., BP/HR after workout)
+    pub post_vital_group_id: Option<i64>,
+    /// Notes about the workout
+    pub notes: Option<String>,
+}
+
+fn default_exercise_type() -> String { "treadmill".to_string() }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetExerciseParams {
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListExercisesParams {
+    /// Start date (inclusive) - optional
+    pub start_date: Option<String>,
+    /// End date (inclusive) - optional
+    pub end_date: Option<String>,
+    /// Maximum results
+    #[serde(default = "default_list_limit")]
+    pub limit: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListExercisesForDayParams {
+    /// Date in ISO format (YYYY-MM-DD)
+    pub date: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateExerciseParams {
+    pub id: i64,
+    /// Vital group ID for PRE-exercise readings
+    pub pre_vital_group_id: Option<i64>,
+    /// Vital group ID for POST-exercise readings
+    pub post_vital_group_id: Option<i64>,
+    /// Notes about the workout
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteExerciseParams {
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddExerciseSegmentParams {
+    /// Exercise session ID
+    pub exercise_id: i64,
+    /// Duration in minutes (provide 2 of 3: duration, speed, distance)
+    pub duration_minutes: Option<f64>,
+    /// Speed in mph (provide 2 of 3: duration, speed, distance)
+    pub speed_mph: Option<f64>,
+    /// Distance in miles (provide 2 of 3: duration, speed, distance)
+    pub distance_miles: Option<f64>,
+    /// Incline percentage (default 0)
+    pub incline_percent: Option<f64>,
+    /// Average heart rate during segment
+    pub avg_heart_rate: Option<f64>,
+    /// Notes about this segment
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UpdateExerciseSegmentParams {
+    pub id: i64,
+    /// Duration in minutes
+    pub duration_minutes: Option<f64>,
+    /// Speed in mph
+    pub speed_mph: Option<f64>,
+    /// Distance in miles
+    pub distance_miles: Option<f64>,
+    /// Incline percentage
+    pub incline_percent: Option<f64>,
+    /// Average heart rate
+    pub avg_heart_rate: Option<f64>,
+    /// Notes
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteExerciseSegmentParams {
+    pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListExerciseStatsParams {
+    /// Start date (inclusive) - optional, defaults to all time
+    pub start_date: Option<String>,
+    /// End date (inclusive) - optional, defaults to all time
+    pub end_date: Option<String>,
+}
+
+// ============================================================================
 // Tool Implementations
 // ============================================================================
 
@@ -1254,6 +1364,137 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(VITAL_INSTRUCTIONS)]))
     }
 
+    // --- Exercise ---
+
+    #[tool(description = "Get step-by-step instructions for tracking exercise. Call this when starting an exercise session or when unsure how to use the exercise tools.")]
+    fn exercise_instructions(&self) -> Result<CallToolResult, McpError> {
+        use crate::tools::status::EXERCISE_INSTRUCTIONS;
+        Ok(CallToolResult::success(vec![Content::text(EXERCISE_INSTRUCTIONS)]))
+    }
+
+    #[tool(description = "Create a new exercise session for a day. Returns exercise ID to add segments to.")]
+    fn add_exercise(&self, Parameters(p): Parameters<AddExerciseParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::add_exercise(
+            &self.database,
+            &p.date,
+            &p.exercise_type,
+            p.timestamp.as_deref(),
+            p.pre_vital_group_id,
+            p.post_vital_group_id,
+            p.notes.as_deref(),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get an exercise session with all its segments")]
+    fn get_exercise(&self, Parameters(p): Parameters<GetExerciseParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::get_exercise(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(ex) => serde_json::to_string_pretty(&ex),
+            None => Ok(format!(r#"{{"error": "Exercise not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List exercises with optional date range filter")]
+    fn list_exercises(&self, Parameters(p): Parameters<ListExercisesParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::list_exercises(
+            &self.database,
+            p.start_date.as_deref(),
+            p.end_date.as_deref(),
+            Some(p.limit),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List exercises for a specific day")]
+    fn list_exercises_for_day(&self, Parameters(p): Parameters<ListExercisesForDayParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::list_exercises_for_day(&self.database, &p.date)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update an exercise session (notes, vital group links)")]
+    fn update_exercise(&self, Parameters(p): Parameters<UpdateExerciseParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::update_exercise(
+            &self.database,
+            p.id,
+            p.pre_vital_group_id,
+            p.post_vital_group_id,
+            p.notes.as_deref(),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(res) => serde_json::to_string_pretty(&res),
+            None => Ok(format!(r#"{{"error": "Exercise not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete an exercise session and all its segments")]
+    fn delete_exercise(&self, Parameters(p): Parameters<DeleteExerciseParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::delete_exercise(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Add a segment to an exercise session. Provide 2 of 3: duration_minutes, speed_mph, distance_miles. System calculates the third and calories burned using current weight.")]
+    fn add_exercise_segment(&self, Parameters(p): Parameters<AddExerciseSegmentParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::add_exercise_segment(
+            &self.database,
+            p.exercise_id,
+            p.duration_minutes,
+            p.speed_mph,
+            p.distance_miles,
+            p.incline_percent,
+            p.avg_heart_rate,
+            p.notes.as_deref(),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Update an exercise segment")]
+    fn update_exercise_segment(&self, Parameters(p): Parameters<UpdateExerciseSegmentParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::update_exercise_segment(
+            &self.database,
+            p.id,
+            p.duration_minutes,
+            p.speed_mph,
+            p.distance_miles,
+            p.incline_percent,
+            p.avg_heart_rate,
+            p.notes.as_deref(),
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = match result {
+            Some(seg) => serde_json::to_string_pretty(&seg),
+            None => Ok(format!(r#"{{"error": "Exercise segment not found", "id": {}}}"#, p.id)),
+        }.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete an exercise segment")]
+    fn delete_exercise_segment(&self, Parameters(p): Parameters<DeleteExerciseSegmentParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::delete_exercise_segment(&self.database, p.id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get comprehensive statistics for exercises. Returns mean, median, mode, SD, min, max, percentiles, and outliers for duration, distance, calories, speed, and incline.")]
+    fn list_exercise_stats(&self, Parameters(p): Parameters<ListExerciseStatsParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::list_exercise_stats(&self.database, p.start_date.as_deref(), p.end_date.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    // --- Vital Groups ---
+
     #[tool(description = "Create a vital group to link related readings together (e.g., BP + HR taken at the same time)")]
     fn create_vital_group(&self, Parameters(p): Parameters<CreateVitalGroupParams>) -> Result<CallToolResult, McpError> {
         let result = vitals::create_vital_group(&self.database, p.description.as_deref(), p.timestamp.as_deref(), p.notes.as_deref())
@@ -1432,8 +1673,8 @@ impl ServerHandler for UhmService {
                 website_url: None,
             },
             instructions: Some(
-                "Universal Health Manager (UHM) - Health, nutrition, and vital sign tracking. \
-                 IMPORTANT: Call meal_instructions for food logging, medication_instructions for meds, vital_instructions for vitals. \
+                "Universal Health Manager (UHM) - Health, nutrition, vital sign, and exercise tracking. \
+                 IMPORTANT: Call meal_instructions for food logging, medication_instructions for meds, vital_instructions for vitals, exercise_instructions for exercise. \
                  Food: add/search/get/list/update/delete_food_item. \
                  Recipes: create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
                  add/update/remove_recipe_component, recalculate_recipe_nutrition. \
@@ -1446,6 +1687,8 @@ impl ServerHandler for UhmService {
                  Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals, list_vitals_stats. \
                  list_vitals_stats: Get comprehensive vital statistics by type (mean, median, mode, SD, outliers, etc.) - much faster than processing raw data. \
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
+                 Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats. \
+                 Exercise calculates calories burned using current weight and MET formula. Link PRE/POST vital groups for recovery tracking. \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),
             ),

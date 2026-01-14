@@ -3,6 +3,7 @@
 //! Rust structs representing database entities.
 
 mod day;
+mod exercise;
 mod food_item;
 mod meal_entry;
 mod medication;
@@ -35,4 +36,9 @@ pub use recipe_ingredient::{
 };
 pub use vital::{
     Vital, VitalCreate, VitalGroup, VitalGroupCreate, VitalType, VitalUpdate,
+};
+pub use exercise::{
+    Exercise, ExerciseCreate, ExerciseUpdate, ExerciseSegment,
+    ExerciseSegmentCreate, ExerciseSegmentUpdate, ExerciseType, CalculatedField,
+    recalculate_day_exercise_calories,
 };

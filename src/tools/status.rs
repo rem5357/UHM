@@ -1147,6 +1147,224 @@ list_vitals_stats(
 - Vitals can be added to a group at creation time or linked later
 "#;
 
+/// Exercise tracking instructions for AI assistants
+pub const EXERCISE_INSTRUCTIONS: &str = r#"
+# UHM Exercise Tracking Instructions
+
+This guide explains how to track exercise using the Universal Health Manager (UHM) tools.
+
+## Overview
+
+The exercise system tracks **treadmill workouts** (expandable to other types in the future). Each exercise session:
+- Belongs to a **Day** (same as meal logging)
+- Contains one or more **Segments** (e.g., 15 min at 2.3 mph, then 15 min at 2.5 mph)
+- Automatically calculates **calories burned** using current weight from vitals
+- Can link to **PRE and POST vital groups** for recovery tracking
+
+## Key Concepts
+
+### Exercise Sessions
+An exercise session represents a single workout (e.g., one trip to the gym or one treadmill session).
+
+### Segments
+Each session can have multiple segments with different settings:
+- **Duration** (minutes)
+- **Speed** (mph)
+- **Distance** (miles)
+- **Incline** (percent)
+
+**Important:** You must provide at least 2 of 3 values (duration, speed, distance). The system calculates the third automatically.
+
+### Automatic Calculations
+- **Third value:** Given 2 of (duration, speed, distance), the 3rd is calculated
+- **Consistency check:** If all 3 provided, system verifies they match (distance = speed × time)
+- **Calories burned:** Uses MET formula with latest weight from vitals database
+- **Exercise totals:** Cached totals (duration, distance, calories) update automatically when segments change
+- **Day totals:** Day's `cached_calories_burned` updates automatically
+
+### Calorie Calculation
+Uses the MET (Metabolic Equivalent of Task) formula:
+```
+Calories = MET × weight_kg × duration_hours
+```
+
+MET values vary by speed:
+| Speed (mph) | MET (approximate) |
+|-------------|-------------------|
+| 2.0 | 2.0 |
+| 2.5 | 2.5 |
+| 3.0 | 3.0 |
+| 3.5 | 3.5 |
+| 4.0 | 4.3 |
+| 5.0 | 6.0 |
+| 6.0 | 9.0 |
+
+Incline adds ~0.1 MET per 1% grade.
+
+## Step-by-Step Workflow
+
+### 1. Create an Exercise Session
+
+```
+add_exercise(
+  date: "2026-01-14",
+  exercise_type: "treadmill",
+  notes: "Morning workout"
+)
+```
+
+Returns exercise ID to use for adding segments.
+
+### 2. Add Segments
+
+For each part of the workout with different settings:
+
+```
+add_exercise_segment(
+  exercise_id: 1,
+  duration_minutes: 15,
+  speed_mph: 2.3,
+  incline_percent: 0,
+  notes: "Warmup"
+)
+
+add_exercise_segment(
+  exercise_id: 1,
+  duration_minutes: 15,
+  speed_mph: 2.5,
+  incline_percent: 2,
+  avg_heart_rate: 83,
+  notes: "Main workout"
+)
+```
+
+Each segment returns:
+- Calculated distance (if not provided)
+- Calories burned for that segment
+- Updated exercise totals
+
+### 3. Link Vital Groups (Optional)
+
+For tracking recovery, link PRE and POST vital readings:
+
+**Before exercise:**
+```
+create_vital_group(description: "Pre-exercise BP/HR")
+add_vital(vital_type: "bp", value1: 118, value2: 76, group_id: 1)
+add_vital(vital_type: "hr", value1: 68, group_id: 1)
+```
+
+**After exercise:**
+```
+create_vital_group(description: "Post-exercise BP/HR")
+add_vital(vital_type: "bp", value1: 135, value2: 85, group_id: 2)
+add_vital(vital_type: "hr", value1: 95, group_id: 2)
+```
+
+**Link to exercise:**
+```
+update_exercise(
+  id: 1,
+  pre_vital_group_id: 1,
+  post_vital_group_id: 2
+)
+```
+
+### 4. View Exercise Details
+
+```
+get_exercise(id: 1)
+```
+
+Returns full details including:
+- All segments with metrics
+- Total duration, distance, calories
+- Linked vital groups
+
+## Quick Reference
+
+| Task | Tool |
+|------|------|
+| Create exercise session | `add_exercise` |
+| Add segment to exercise | `add_exercise_segment` |
+| View exercise with segments | `get_exercise` |
+| List exercises | `list_exercises` |
+| List exercises for a day | `list_exercises_for_day` |
+| Update exercise (notes, vital links) | `update_exercise` |
+| Update segment | `update_exercise_segment` |
+| Delete segment | `delete_exercise_segment` |
+| Delete exercise | `delete_exercise` |
+| Get exercise statistics | `list_exercise_stats` |
+
+## Common Scenarios
+
+### Quick Single-Segment Workout
+```
+add_exercise(date: "2026-01-14", exercise_type: "treadmill")
+add_exercise_segment(exercise_id: 1, duration_minutes: 30, speed_mph: 3.0)
+```
+
+### Multi-Segment Interval Training
+```
+add_exercise(date: "2026-01-14", exercise_type: "treadmill", notes: "Interval training")
+add_exercise_segment(exercise_id: 1, duration_minutes: 5, speed_mph: 2.5, notes: "Warmup")
+add_exercise_segment(exercise_id: 1, duration_minutes: 2, speed_mph: 4.0, incline_percent: 1)
+add_exercise_segment(exercise_id: 1, duration_minutes: 3, speed_mph: 3.0)
+add_exercise_segment(exercise_id: 1, duration_minutes: 2, speed_mph: 4.0, incline_percent: 1)
+add_exercise_segment(exercise_id: 1, duration_minutes: 3, speed_mph: 3.0)
+add_exercise_segment(exercise_id: 1, duration_minutes: 5, speed_mph: 2.5, notes: "Cooldown")
+```
+
+### Analyze Exercise Trends
+```
+list_exercise_stats(start_date: "2026-01-01", end_date: "2026-01-31")
+```
+
+Returns statistics for:
+- Duration (total workout time)
+- Distance (miles covered)
+- Calories burned
+- Speed (average across segments)
+- Incline (average across segments)
+
+Each includes: count, average, median, mode, SD, min, max, percentiles, outliers.
+
+## Input Validation
+
+### Segment Requirements
+- **Must provide 2 of 3:** duration_minutes, speed_mph, distance_miles
+- System calculates the missing value
+- If all 3 provided, system checks consistency (1% tolerance)
+
+### Consistency Flag
+If values don't match (e.g., 30 min at 3 mph but distance says 2 miles instead of 1.5):
+- `is_consistent: false` in response
+- Values are still recorded as provided
+- Claude should alert user to the inconsistency
+
+## Integration with Days
+
+Exercise calories appear in day reports:
+- `get_day` includes `cached_calories_burned` field
+- Net calories = `cached_calories` (consumed) - `cached_calories_burned` (exercise)
+- Day totals update automatically when exercises change
+
+## Weight Tracking
+
+- System uses latest weight from vitals for calorie calculation
+- If no weight recorded, defaults to 150 lbs
+- Each segment records `weight_used_lbs` for reference
+- Update weight vitals regularly for accurate calorie calculations
+
+## Notes
+
+- Dates use ISO format: YYYY-MM-DD
+- Exercise timestamps default to current time if not provided
+- Deleting an exercise deletes all its segments (cascade)
+- Segment order is assigned automatically (1, 2, 3, ...)
+- Vital groups can be created before or after exercise, then linked
+"#;
+
 /// Runtime status of the UHM service
 #[derive(Debug, Clone, Serialize)]
 pub struct UhmStatus {

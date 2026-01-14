@@ -9,6 +9,7 @@ use crate::db::Database;
 use crate::models::{
     Day, DayUpdate, MealEntry, MealEntryCreate, MealEntryDetail, MealEntryUpdate,
     MealType, Nutrition, recalculate_day_nutrition,
+    Exercise, ExerciseSegment,
 };
 
 /// Response for get_or_create_day
@@ -25,7 +26,23 @@ pub struct DayDetail {
     pub id: i64,
     pub date: String,
     pub meals: DayMeals,
+    pub exercises: Vec<DayExerciseSummary>,
     pub nutrition_total: Nutrition,
+    pub calories_burned: f64,
+    pub net_calories: f64,
+    pub notes: Option<String>,
+}
+
+/// Exercise summary for day detail
+#[derive(Debug, Serialize)]
+pub struct DayExerciseSummary {
+    pub id: i64,
+    pub exercise_type: String,
+    pub timestamp: String,
+    pub total_duration_minutes: f64,
+    pub total_distance_miles: f64,
+    pub calories_burned: f64,
+    pub segment_count: usize,
     pub notes: Option<String>,
 }
 
@@ -143,7 +160,7 @@ pub fn get_or_create_day(db: &Database, date: &str) -> Result<GetOrCreateDayResp
     }
 }
 
-/// Get a day with full details including meals
+/// Get a day with full details including meals and exercises
 pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
@@ -152,6 +169,7 @@ pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
 
     match day {
         Some(day) => {
+            // Get meal entries
             let entries = MealEntry::get_details_for_day(&conn, day.id)
                 .map_err(|e| format!("Failed to get meal entries: {}", e))?;
 
@@ -173,11 +191,44 @@ pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
                 }
             }
 
+            // Get exercises for this day
+            let exercises_raw = Exercise::list_for_day(&conn, day.id)
+                .map_err(|e| format!("Failed to get exercises: {}", e))?;
+
+            let mut exercises = Vec::new();
+            for e in exercises_raw {
+                let segments = ExerciseSegment::list_for_exercise(&conn, e.id)
+                    .map_err(|e| format!("Failed to get exercise segments: {}", e))?;
+
+                exercises.push(DayExerciseSummary {
+                    id: e.id,
+                    exercise_type: e.exercise_type.display_name().to_string(),
+                    timestamp: e.timestamp,
+                    total_duration_minutes: e.cached_duration_minutes,
+                    total_distance_miles: e.cached_distance_miles,
+                    calories_burned: e.cached_calories_burned,
+                    segment_count: segments.len(),
+                    notes: e.notes,
+                });
+            }
+
+            // Calculate calories burned from cached value
+            let calories_burned: f64 = conn.query_row(
+                "SELECT COALESCE(cached_calories_burned, 0) FROM days WHERE id = ?1",
+                [day.id],
+                |row| row.get(0),
+            ).unwrap_or(0.0);
+
+            let net_calories = day.cached_nutrition.calories - calories_burned;
+
             Ok(Some(DayDetail {
                 id: day.id,
                 date: day.date,
                 meals,
+                exercises,
                 nutrition_total: day.cached_nutrition,
+                calories_burned,
+                net_calories,
                 notes: day.notes,
             }))
         }
