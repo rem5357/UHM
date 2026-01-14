@@ -355,6 +355,14 @@ pub struct ListDaysParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListDaysStatsParams {
+    /// Start date (inclusive) - optional, defaults to all time
+    pub start_date: Option<String>,
+    /// End date (inclusive) - optional, defaults to all time
+    pub end_date: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UpdateDayParams {
     /// Date in ISO format: YYYY-MM-DD
     pub date: String,
@@ -1024,6 +1032,14 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Get comprehensive statistics for days' nutrition data. Returns mean, median, mode, standard deviation, min, max, percentiles, and outliers for each nutrient. Much faster than processing raw data externally.")]
+    fn list_days_stats(&self, Parameters(p): Parameters<ListDaysStatsParams>) -> Result<CallToolResult, McpError> {
+        let result = days::list_days_stats(&self.database, p.start_date.as_deref(), p.end_date.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Update day notes")]
     fn update_day(&self, Parameters(p): Parameters<UpdateDayParams>) -> Result<CallToolResult, McpError> {
         let result = days::update_day(&self.database, &p.date, p.notes).map_err(|e| McpError::internal_error(e, None))?;
@@ -1403,7 +1419,8 @@ impl ServerHandler for UhmService {
                  Food: add/search/get/list/update/delete_food_item. \
                  Recipes: create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
                  add/update/remove_recipe_component, recalculate_recipe_nutrition. \
-                 Days: get_or_create_day/get_day/list_days/update_day. \
+                 Days: get_or_create_day/get_day/list_days/update_day/list_days_stats. \
+                 list_days_stats: Get comprehensive nutrition statistics (mean, median, mode, SD, outliers, etc.) - much faster than processing raw data. \
                  Meals: log_meal/get_meal_entry/update_meal_entry/delete_meal_entry, recalculate_day_nutrition. \
                  Medications: add/get/list/search/update/deprecate/reactivate/delete_medication, export_medications_markdown. \
                  For medication dosage changes: deprecate old entry and add new one to preserve history. \

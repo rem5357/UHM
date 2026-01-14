@@ -534,6 +534,7 @@ Six months later, you won't remember if "248g" was 8 scoops or something else.
 | Log meal to day | `log_meal` |
 | View day's meals | `get_day` |
 | List recent days | `list_days` |
+| Get nutrition statistics | `list_days_stats` |
 | Update meal entry | `update_meal_entry` |
 | Delete meal entry | `delete_meal_entry` |
 
@@ -569,6 +570,31 @@ log_meal(date, "dinner", recipe_id: 5, servings: 1, percent_eaten: 75)
 ```
 update_meal_entry(id: 12, servings: 2)  // ate more than initially logged
 ```
+
+### Analyzing nutrition trends
+Use `list_days_stats` to get comprehensive statistics across all logged days:
+```
+list_days_stats(start_date: "2026-01-01", end_date: "2026-01-31")
+```
+
+Returns for each nutrient (calories, protein, carbs, fat, fiber, sugar, sodium, saturated_fat, cholesterol):
+- **count** - Number of days with data
+- **sum** - Total across all days
+- **average** - Mean daily intake
+- **median** - Middle value (less affected by outliers)
+- **mode** - Most common value
+- **standard_deviation** - Variability measure
+- **min / max / range** - Lowest, highest, and spread
+- **percentile_25 / percentile_75 / iqr** - Quartiles and interquartile range
+- **coefficient_of_variation** - Relative variability (SD/mean × 100)
+- **outliers** - Days outside 1 standard deviation (with date, value, z-score)
+
+**Why use this?** Much faster than fetching raw data and calculating in Claude Desktop. A single tool call returns all statistics instantly.
+
+**Example use cases:**
+- "What's my average daily calorie intake this month?"
+- "Which days had unusually high sodium?"
+- "How consistent is my protein intake?"
 
 ## Updating Food Items (Cascading Recalculation)
 
