@@ -47,6 +47,11 @@ pub struct DaySummary {
     pub total_protein: f64,
     pub total_carbs: f64,
     pub total_fat: f64,
+    pub total_fiber: f64,
+    pub total_sugar: f64,
+    pub total_sodium: f64,
+    pub total_saturated_fat: f64,
+    pub total_cholesterol: f64,
     pub meal_count: usize,
 }
 
@@ -210,6 +215,11 @@ pub fn list_days(
             total_protein: day.cached_nutrition.protein,
             total_carbs: day.cached_nutrition.carbs,
             total_fat: day.cached_nutrition.fat,
+            total_fiber: day.cached_nutrition.fiber,
+            total_sugar: day.cached_nutrition.sugar,
+            total_sodium: day.cached_nutrition.sodium,
+            total_saturated_fat: day.cached_nutrition.saturated_fat,
+            total_cholesterol: day.cached_nutrition.cholesterol,
             meal_count: entries.len(),
         });
     }
