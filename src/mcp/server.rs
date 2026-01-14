@@ -691,6 +691,28 @@ pub struct ImportOmronBpCsvParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImportWeightCsvParams {
+    /// Full path to the weight CSV file. Format: date,value,unit (header optional, unit defaults to lbs)
+    pub file_path: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WeightEntryParam {
+    /// Date (YYYY-MM-DD, MM/DD/YYYY, or MM-DD-YYYY)
+    pub date: String,
+    /// Weight value
+    pub value: f64,
+    /// Unit (optional, defaults to "lbs")
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddWeightsBatchParams {
+    /// Array of weight entries to add
+    pub entries: Vec<WeightEntryParam>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListVitalsStatsParams {
     /// Vital type: weight, blood_pressure (bp), heart_rate (hr), oxygen_saturation (o2/spo2), glucose
     pub vital_type: String,
@@ -1671,6 +1693,50 @@ impl UhmService {
             "duplicates_cleaned_hr": result.duplicates_cleaned_hr,
             "message": format!("Imported {} BP/HR readings ({} duplicates skipped, {} errors){}",
                 result.imported, result.duplicates, result.skipped, cleanup_msg)
+        });
+        let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Import weight data from a CSV file. Format: date,value,unit (one reading per line). Header row optional. Date formats: YYYY-MM-DD, MM/DD/YYYY, M/D/YYYY. Unit defaults to 'lbs' if omitted. Skips duplicates (same date and value).")]
+    fn import_weight_csv(&self, Parameters(p): Parameters<ImportWeightCsvParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::import_weight_csv(&self.database, &p.file_path)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let summary = serde_json::json!({
+            "success": result.success,
+            "file_path": result.file_path,
+            "total_rows": result.total_rows,
+            "imported": result.imported,
+            "duplicates": result.duplicates,
+            "skipped": result.skipped,
+            "errors": result.errors,
+            "date_range": result.date_range,
+            "message": format!("Imported {} weight readings ({} duplicates skipped, {} errors)",
+                result.imported, result.duplicates, result.skipped)
+        });
+        let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Add multiple weight entries in a single call. Pass an array of {date, value, unit?} objects. Date formats: YYYY-MM-DD, MM/DD/YYYY, MM-DD-YYYY. Unit defaults to 'lbs'. Skips duplicates (same date and value).")]
+    fn add_weights_batch(&self, Parameters(p): Parameters<AddWeightsBatchParams>) -> Result<CallToolResult, McpError> {
+        // Convert params to vitals::WeightEntry
+        let entries: Vec<vitals::WeightEntry> = p.entries.into_iter().map(|e| vitals::WeightEntry {
+            date: e.date,
+            value: e.value,
+            unit: e.unit,
+        }).collect();
+
+        let result = vitals::add_weights_batch(&self.database, &entries)
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let summary = serde_json::json!({
+            "added": result.added,
+            "duplicates": result.duplicates,
+            "errors": result.errors,
+            "results": result.results,
+            "message": format!("Added {} weights ({} duplicates, {} errors)",
+                result.added, result.duplicates, result.errors)
         });
         let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))

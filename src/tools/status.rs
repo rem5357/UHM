@@ -1055,6 +1055,8 @@ You can use these shortcuts when specifying vital_type:
 | List by date range | `list_vitals_by_date_range` |
 | Get latest of each type | `get_latest_vitals` |
 | Get statistics by type | `list_vitals_stats` |
+| **Batch import weights** | `add_weights_batch` |
+| Import weights from CSV | `import_weight_csv` |
 | Create group | `create_vital_group` |
 | View group with vitals | `get_vital_group` |
 | List groups | `list_vital_groups` |
@@ -1137,6 +1139,34 @@ list_vitals_stats(
 - "How consistent is my heart rate?"
 
 **Why use this?** Much faster than fetching raw data and calculating in Claude Desktop. A single tool call returns all statistics instantly.
+
+### Batch Weight Import
+
+For importing multiple historical weight entries (e.g., from logs or documents), use `add_weights_batch`:
+
+```
+add_weights_batch(entries: [
+  {date: "2025-01-15", value: 185.5},
+  {date: "2025-01-16", value: 185.2, unit: "lbs"},
+  {date: "1/17/2025", value: 184.8}
+])
+```
+
+**Features:**
+- Accepts array of `{date, value, unit?}` objects
+- Date formats: `YYYY-MM-DD`, `MM/DD/YYYY`, `MM-DD-YYYY`
+- Unit defaults to "lbs" if omitted
+- Skips duplicates (same date + value already exists)
+- Returns per-entry status: "added", "duplicate", or "error"
+
+**Use case:** User provides weight history in markdown/documents. Extract dates and values, then call `add_weights_batch` once with all entries instead of calling `add_vital` for each weight.
+
+For CSV files, use `import_weight_csv(file_path: "path/to/weights.csv")` with format:
+```
+date,value,unit
+2025-01-15,185.5,lbs
+2025-01-16,185.2,lbs
+```
 
 ## Notes
 

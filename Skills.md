@@ -323,6 +323,32 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - **Files Modified**:
   - `src/models/exercise.rs` - Updated MET lookup table in calculate_met()
 
+### Phase 19: Batch Weight Import
+- **Purpose**: Enable bulk import of historical weight data without per-entry tool calls
+- **Problem Solved**: Importing a year of weight data from logs/documents would require hundreds of individual `add_vital` calls
+- **New Tools**:
+  - `add_weights_batch` - Add multiple weight entries in a single call
+    - Input: Array of `{date, value, unit?}` objects
+    - Date formats: `YYYY-MM-DD`, `MM/DD/YYYY`, `MM-DD-YYYY`
+    - Unit defaults to "lbs" if omitted
+    - Skips duplicates (same date + value already exists)
+    - Returns per-entry status: "added", "duplicate", or "error"
+  - `import_weight_csv` - Import weights from CSV file
+    - Format: `date,value,unit` (one per line, header optional)
+    - Same date formats and duplicate handling as batch tool
+- **Use Case**: Claude Desktop can extract weights from markdown logs/documents and send all entries in one `add_weights_batch` call
+- **Example**:
+  ```
+  add_weights_batch(entries: [
+    {date: "2025-01-15", value: 185.5},
+    {date: "2025-01-16", value: 185.2, unit: "lbs"},
+    {date: "1/17/2025", value: 184.8}
+  ])
+  ```
+- **Files Modified**:
+  - `src/tools/vitals.rs` - WeightEntry, add_weights_batch, import_weight_csv, parse_weight_date
+  - `src/mcp/server.rs` - Tool registrations and parameter structs
+
 ## Technology Stack
 
 ### Rust

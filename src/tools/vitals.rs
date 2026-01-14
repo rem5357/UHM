@@ -1803,3 +1803,396 @@ pub fn auto_cleanup_exercise_duplicates(
         hr_deleted: hr_to_delete.len(),
     })
 }
+
+// ============================================================================
+// Weight CSV Import
+// ============================================================================
+
+/// Result for a single imported weight reading
+#[derive(Debug, Serialize)]
+pub struct WeightImportRow {
+    pub row_num: usize,
+    pub date: String,
+    pub value: f64,
+    pub unit: String,
+    pub vital_id: i64,
+}
+
+/// Response for weight CSV import
+#[derive(Debug, Serialize)]
+pub struct WeightImportResponse {
+    pub success: bool,
+    pub file_path: String,
+    pub total_rows: usize,
+    pub imported: usize,
+    pub duplicates: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+    pub date_range: String,
+    pub readings: Vec<WeightImportRow>,
+}
+
+/// Check if a weight reading already exists with matching date and value
+fn weight_reading_exists(
+    conn: &rusqlite::Connection,
+    date: &str,
+    value: f64,
+) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            r#"SELECT COUNT(*) FROM vitals
+               WHERE vital_type = 'weight'
+               AND timestamp LIKE ?1
+               AND value1 = ?2"#,
+            rusqlite::params![format!("{}%", date), value],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to check for weight duplicates: {}", e))?;
+    Ok(count > 0)
+}
+
+/// Import weight data from a simple CSV file.
+/// Format: date,value,unit (header row optional)
+/// Date formats supported: YYYY-MM-DD, MM/DD/YYYY, M/D/YYYY
+/// Unit defaults to "lbs" if not provided or empty
+pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportResponse, String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(file_path)
+        .map_err(|e| format!("Failed to open file '{}': {}", file_path, e))?;
+    let reader = BufReader::new(file);
+
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let mut readings = Vec::new();
+    let mut errors = Vec::new();
+    let mut skipped = 0;
+    let mut duplicates = 0;
+    let mut first_date: Option<String> = None;
+    let mut last_date: Option<String> = None;
+
+    for (line_num, line_result) in reader.lines().enumerate() {
+        let line = line_result.map_err(|e| format!("Error reading line {}: {}", line_num + 1, e))?;
+
+        // Skip header row (if it looks like a header)
+        if line_num == 0 {
+            let lower = line.to_lowercase();
+            if lower.contains("date") || lower.contains("weight") || lower.contains("unit") {
+                continue;
+            }
+        }
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse CSV row
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.is_empty() {
+            continue;
+        }
+
+        // Parse date (required)
+        let date_str = fields[0].trim();
+        let date = match parse_weight_date(date_str) {
+            Ok(d) => d,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Parse value (required)
+        if fields.len() < 2 {
+            errors.push(format!("Row {}: Missing weight value", line_num + 1));
+            skipped += 1;
+            continue;
+        }
+
+        let value: f64 = match fields[1].trim().parse() {
+            Ok(v) if v > 0.0 => v,
+            Ok(_) => {
+                errors.push(format!("Row {}: Weight must be positive", line_num + 1));
+                skipped += 1;
+                continue;
+            }
+            Err(_) => {
+                errors.push(format!("Row {}: Invalid weight value '{}'", line_num + 1, fields[1].trim()));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Parse unit (optional, defaults to lbs)
+        let unit = if fields.len() > 2 && !fields[2].trim().is_empty() {
+            fields[2].trim().to_string()
+        } else {
+            "lbs".to_string()
+        };
+
+        // Track date range
+        if first_date.is_none() {
+            first_date = Some(date.clone());
+        }
+        last_date = Some(date.clone());
+
+        // Check for duplicate
+        match weight_reading_exists(&conn, &date, value) {
+            Ok(true) => {
+                duplicates += 1;
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                errors.push(format!("Row {}: {}", line_num + 1, e));
+                skipped += 1;
+                continue;
+            }
+        }
+
+        // Create the vital
+        let timestamp = format!("{}T12:00:00", date); // Default to noon for date-only entries
+        let data = VitalCreate {
+            vital_type: VitalType::Weight,
+            timestamp: Some(timestamp),
+            value1: value,
+            value2: None,
+            unit: Some(unit.clone()),
+            group_id: None,
+            notes: None,
+        };
+
+        match Vital::create(&conn, &data) {
+            Ok(vital) => {
+                readings.push(WeightImportRow {
+                    row_num: line_num + 1,
+                    date: date.clone(),
+                    value,
+                    unit,
+                    vital_id: vital.id,
+                });
+            }
+            Err(e) => {
+                errors.push(format!("Row {}: Failed to create vital: {}", line_num + 1, e));
+                skipped += 1;
+            }
+        }
+    }
+
+    let imported = readings.len();
+    let total_rows = imported + duplicates + skipped;
+    let date_range = match (&first_date, &last_date) {
+        (Some(start), Some(end)) => format!("{} to {}", start, end),
+        _ => "N/A".to_string(),
+    };
+
+    Ok(WeightImportResponse {
+        success: errors.is_empty(),
+        file_path: file_path.to_string(),
+        total_rows,
+        imported,
+        duplicates,
+        skipped,
+        errors: if errors.len() > 10 { errors[..10].to_vec() } else { errors },
+        date_range,
+        readings,
+    })
+}
+
+/// Parse various date formats to YYYY-MM-DD
+fn parse_weight_date(date_str: &str) -> Result<String, String> {
+    let s = date_str.trim();
+
+    // Try YYYY-MM-DD first (ISO format)
+    if s.len() >= 8 && s.len() <= 10 {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() == 3 {
+            if let (Ok(first), Ok(second), Ok(third)) = (
+                parts[0].parse::<u32>(),
+                parts[1].parse::<u32>(),
+                parts[2].parse::<u32>(),
+            ) {
+                // Check if first part is a 4-digit year (YYYY-MM-DD)
+                if first >= 1900 && first <= 2100 && second >= 1 && second <= 12 && third >= 1 && third <= 31 {
+                    return Ok(format!("{:04}-{:02}-{:02}", first, second, third));
+                }
+                // Check if third part is a 4-digit year (MM-DD-YYYY)
+                if third >= 1900 && third <= 2100 && first >= 1 && first <= 12 && second >= 1 && second <= 31 {
+                    return Ok(format!("{:04}-{:02}-{:02}", third, first, second));
+                }
+            }
+        }
+    }
+
+    // Try MM/DD/YYYY or M/D/YYYY
+    let parts: Vec<&str> = s.split('/').collect();
+    if parts.len() == 3 {
+        if let (Ok(month), Ok(day), Ok(year)) = (
+            parts[0].parse::<u32>(),
+            parts[1].parse::<u32>(),
+            parts[2].parse::<u32>(),
+        ) {
+            if year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31 {
+                return Ok(format!("{:04}-{:02}-{:02}", year, month, day));
+            }
+        }
+    }
+
+    Err(format!("Invalid date format: '{}'. Expected YYYY-MM-DD, MM/DD/YYYY, or MM-DD-YYYY", date_str))
+}
+
+// ============================================================================
+// Batch Weight Entry
+// ============================================================================
+
+/// A single weight entry for batch import
+#[derive(Debug, serde::Deserialize)]
+pub struct WeightEntry {
+    /// Date in YYYY-MM-DD, MM/DD/YYYY, or MM-DD-YYYY format
+    pub date: String,
+    /// Weight value
+    pub value: f64,
+    /// Unit (optional, defaults to "lbs")
+    pub unit: Option<String>,
+}
+
+/// Result for a single weight in batch
+#[derive(Debug, Serialize)]
+pub struct WeightBatchResult {
+    pub date: String,
+    pub value: f64,
+    pub unit: String,
+    pub status: String,  // "added", "duplicate", "error"
+    pub vital_id: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// Response for batch weight entry
+#[derive(Debug, Serialize)]
+pub struct AddWeightsBatchResponse {
+    pub added: usize,
+    pub duplicates: usize,
+    pub errors: usize,
+    pub results: Vec<WeightBatchResult>,
+}
+
+/// Add multiple weight entries in a single call
+pub fn add_weights_batch(db: &Database, entries: &[WeightEntry]) -> Result<AddWeightsBatchResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let mut results = Vec::new();
+    let mut added = 0;
+    let mut duplicates = 0;
+    let mut errors = 0;
+
+    for entry in entries {
+        // Parse and validate date
+        let date = match parse_weight_date(&entry.date) {
+            Ok(d) => d,
+            Err(e) => {
+                errors += 1;
+                results.push(WeightBatchResult {
+                    date: entry.date.clone(),
+                    value: entry.value,
+                    unit: entry.unit.clone().unwrap_or_else(|| "lbs".to_string()),
+                    status: "error".to_string(),
+                    vital_id: None,
+                    error: Some(e),
+                });
+                continue;
+            }
+        };
+
+        // Validate value
+        if entry.value <= 0.0 {
+            errors += 1;
+            results.push(WeightBatchResult {
+                date: date.clone(),
+                value: entry.value,
+                unit: entry.unit.clone().unwrap_or_else(|| "lbs".to_string()),
+                status: "error".to_string(),
+                vital_id: None,
+                error: Some("Weight must be positive".to_string()),
+            });
+            continue;
+        }
+
+        let unit = entry.unit.clone().unwrap_or_else(|| "lbs".to_string());
+
+        // Check for duplicate
+        match weight_reading_exists(&conn, &date, entry.value) {
+            Ok(true) => {
+                duplicates += 1;
+                results.push(WeightBatchResult {
+                    date: date.clone(),
+                    value: entry.value,
+                    unit,
+                    status: "duplicate".to_string(),
+                    vital_id: None,
+                    error: None,
+                });
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                errors += 1;
+                results.push(WeightBatchResult {
+                    date: date.clone(),
+                    value: entry.value,
+                    unit,
+                    status: "error".to_string(),
+                    vital_id: None,
+                    error: Some(e),
+                });
+                continue;
+            }
+        }
+
+        // Create the vital
+        let timestamp = format!("{}T12:00:00", date);
+        let data = VitalCreate {
+            vital_type: VitalType::Weight,
+            timestamp: Some(timestamp),
+            value1: entry.value,
+            value2: None,
+            unit: Some(unit.clone()),
+            group_id: None,
+            notes: None,
+        };
+
+        match Vital::create(&conn, &data) {
+            Ok(vital) => {
+                added += 1;
+                results.push(WeightBatchResult {
+                    date: date.clone(),
+                    value: entry.value,
+                    unit,
+                    status: "added".to_string(),
+                    vital_id: Some(vital.id),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                errors += 1;
+                results.push(WeightBatchResult {
+                    date: date.clone(),
+                    value: entry.value,
+                    unit,
+                    status: "error".to_string(),
+                    vital_id: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(AddWeightsBatchResponse {
+        added,
+        duplicates,
+        errors,
+        results,
+    })
+}
