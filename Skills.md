@@ -252,15 +252,20 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/status.rs` - EXERCISE_INSTRUCTIONS
   - `src/mcp/server.rs` - Tool registrations
 
-### Phase 16: Duplicate Vitals Detection
+### Phase 16: Duplicate Vitals Detection & Auto-Cleanup
 - **Purpose**: Identify and clean up duplicate vital readings between exercise-linked and standalone entries
 - **Problem Solved**: When entering BP during exercise tracking, readings may be entered both as part of exercise PRE/POST vital groups AND as standalone vitals, causing duplicates
 - **New Tools**:
   - `find_duplicate_vitals` - Finds potential duplicates by matching:
     - Same vital type (BP with BP, HR with HR)
     - Same values (systolic/diastolic for BP, bpm for HR)
-    - Timestamps within configurable window (default: 60 minutes)
+    - Timestamps within configurable window (default: 24 hours / 1440 minutes)
   - `delete_vitals_bulk` - Delete multiple vitals by ID for confirmed duplicate removal
+- **Auto-Cleanup After Import**:
+  - `import_omron_bp_csv` now automatically removes duplicate standalone vitals after import
+  - Keeps exercise-linked vitals (which have PRE/POST context), deletes matching standalone duplicates
+  - Response includes `duplicates_cleaned_bp` and `duplicates_cleaned_hr` counts
+  - Uses 24-hour window - exact matches on same day are unlikely to be coincidental
 - **How It Works**:
   1. Queries all vitals in exercise-linked vital groups (PRE/POST)
   2. Queries all standalone vitals (not in exercise groups)
@@ -272,9 +277,51 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   2. Review pairs - exercise_vital is usually the one to keep
   3. Call delete_vitals_bulk([ids]) to remove confirmed duplicates
   ```
+  Or simply import via `import_omron_bp_csv` - cleanup happens automatically.
 - **Files Modified**:
-  - `src/tools/vitals.rs` - find_duplicate_vitals, delete_vitals_bulk functions
+  - `src/tools/vitals.rs` - find_duplicate_vitals, delete_vitals_bulk, auto_cleanup_exercise_duplicates
   - `src/mcp/server.rs` - Tool registrations and params
+
+### Phase 17: Full Field Updateability
+- **Purpose**: Allow all fields in exercises and vitals to be updated, not just notes
+- **Problem Solved**: Timestamps could not be corrected after entry; some fields were read-only
+- **Exercise Updates** (`update_exercise`):
+  - Now accepts `timestamp` parameter to fix incorrect exercise times
+  - All fields: timestamp, pre_vital_group_id, post_vital_group_id, notes
+- **Vital Updates** (`update_vital`):
+  - Now accepts `timestamp` parameter to correct reading times
+  - Now accepts `group_id` parameter to link/unlink from vital groups
+  - All fields: timestamp, value1, value2, unit, group_id, notes
+- **Files Modified**:
+  - `src/models/exercise.rs` - Added timestamp to ExerciseUpdate struct
+  - `src/models/vital.rs` - Added timestamp to VitalUpdate struct
+  - `src/tools/exercise.rs` - Updated update_exercise function
+  - `src/tools/vitals.rs` - Updated update_vital function
+  - `src/mcp/server.rs` - Updated tool parameter structs
+
+### Phase 18: Compendium MET Values
+- **Purpose**: Use standardized MET values from the Compendium of Physical Activities
+- **Problem Solved**: Original MET values were estimates; standardized values improve accuracy
+- **MET Formula**: `calories = MET × weight_kg × duration_hours`
+- **Updated MET Table** (by speed in mph):
+  | Speed | MET | Activity Description |
+  |-------|-----|---------------------|
+  | <2.0  | 2.0 | Very slow walking |
+  | 2.0-2.4 | 2.8 | Slow walking |
+  | 2.5-2.9 | 3.0 | Leisurely walking |
+  | 3.0-3.4 | 3.5 | Moderate walking |
+  | 3.5-3.9 | 4.3 | Brisk walking |
+  | 4.0-4.4 | 5.0 | Very brisk walking |
+  | 4.5-4.9 | 7.0 | Jogging/running |
+  | 5.0-5.4 | 8.3 | Running |
+  | 5.5-5.9 | 9.0 | Running |
+  | 6.0-6.9 | 9.8 | Running |
+  | 7.0-7.9 | 10.5 | Running |
+  | 8.0-8.9 | 11.5 | Fast running |
+  | 9.0+  | 12.8 | Very fast running |
+- **Incline Adjustment**: +0.1 MET per 1% grade (unchanged)
+- **Files Modified**:
+  - `src/models/exercise.rs` - Updated MET lookup table in calculate_met()
 
 ## Technology Stack
 
@@ -350,6 +397,18 @@ Build number starts at 0 and increments to 1 on first build. Each source change 
 - **Problem**: When tracking exercise with PRE/POST vitals, the same readings can accidentally be entered both as exercise-linked groups AND standalone vitals
 - **Solution**: Use `find_duplicate_vitals` to scan for matches and `delete_vitals_bulk` to clean up
 - **Best Practice**: Going forward, announce exercise time explicitly so timestamps align properly
+- **Auto-cleanup**: Import tools now automatically clean up duplicates - keeps exercise-linked (with context), removes standalone duplicates
+
+### Standard References for Health Data
+- **MET Values**: Always use the Compendium of Physical Activities for standardized MET values
+- **Why it matters**: Self-estimated values can drift from standards; using authoritative sources ensures consistency
+- **Resource**: Compendium of Physical Activities (sites.google.com/site/compendiumofphysicalactivities/)
+
+### Model Field Updateability
+- **Principle**: All fields in a model should be updateable, not just "notes"
+- **Reasoning**: Users make mistakes - wrong timestamps, incorrect values, missing links
+- **Implementation**: Include all relevant fields in Update structs, even if rarely changed
+- **Example**: Adding `timestamp` to ExerciseUpdate and VitalUpdate allows correcting entry times
 
 ## Project Structure
 
