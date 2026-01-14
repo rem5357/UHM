@@ -1639,11 +1639,18 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Import blood pressure and heart rate data from an Omron CSV export file. Creates grouped BP/HR vitals for each reading. File format: Date,Time,Systolic,Diastolic,Pulse,...")]
+    #[tool(description = "Import blood pressure and heart rate data from an Omron CSV export file. Creates grouped BP/HR vitals for each reading. Auto-cleans standalone duplicates that conflict with exercise-linked vitals. File format: Date,Time,Systolic,Diastolic,Pulse,...")]
     fn import_omron_bp_csv(&self, Parameters(p): Parameters<ImportOmronBpCsvParams>) -> Result<CallToolResult, McpError> {
         let result = vitals::import_omron_bp_csv(&self.database, &p.file_path)
             .map_err(|e| McpError::internal_error(e, None))?;
         // Only return summary, not all readings (can be huge)
+        let cleaned_total = result.duplicates_cleaned_bp + result.duplicates_cleaned_hr;
+        let cleanup_msg = if cleaned_total > 0 {
+            format!(", cleaned {} exercise duplicates ({} BP, {} HR)",
+                cleaned_total, result.duplicates_cleaned_bp, result.duplicates_cleaned_hr)
+        } else {
+            String::new()
+        };
         let summary = serde_json::json!({
             "success": result.success,
             "file_path": result.file_path,
@@ -1653,8 +1660,10 @@ impl UhmService {
             "skipped": result.skipped,
             "errors": result.errors,
             "date_range": result.date_range,
-            "message": format!("Imported {} BP/HR readings ({} duplicates skipped, {} errors)",
-                result.imported, result.duplicates, result.skipped)
+            "duplicates_cleaned_bp": result.duplicates_cleaned_bp,
+            "duplicates_cleaned_hr": result.duplicates_cleaned_hr,
+            "message": format!("Imported {} BP/HR readings ({} duplicates skipped, {} errors){}",
+                result.imported, result.duplicates, result.skipped, cleanup_msg)
         });
         let json = serde_json::to_string_pretty(&summary).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))

@@ -567,6 +567,10 @@ pub struct OmronImportResponse {
     pub errors: Vec<String>,
     pub date_range: String,
     pub readings: Vec<OmronImportRow>,
+    /// Number of standalone BP vitals deleted (duplicates of exercise-linked vitals)
+    pub duplicates_cleaned_bp: usize,
+    /// Number of standalone HR vitals deleted (duplicates of exercise-linked vitals)
+    pub duplicates_cleaned_hr: usize,
 }
 
 /// Parse Omron date format "Jan 6 2026" to "2026-01-06"
@@ -840,6 +844,11 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         _ => "N/A".to_string(),
     };
 
+    // Auto-cleanup: delete standalone vitals that duplicate exercise-linked vitals
+    // Use 60 minute window to match readings that might have slight timestamp differences
+    let cleanup_result = auto_cleanup_exercise_duplicates(&conn, 60)
+        .unwrap_or_default();
+
     Ok(OmronImportResponse {
         success: errors.is_empty(),
         file_path: file_path.to_string(),
@@ -850,6 +859,8 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         errors: if errors.len() > 10 { errors[..10].to_vec() } else { errors },
         date_range,
         readings,
+        duplicates_cleaned_bp: cleanup_result.bp_deleted,
+        duplicates_cleaned_hr: cleanup_result.hr_deleted,
     })
 }
 
@@ -1626,4 +1637,166 @@ pub struct BulkDeleteResponse {
     pub deleted_ids: Vec<i64>,
     pub not_found_ids: Vec<i64>,
     pub errors: Vec<String>,
+}
+
+/// Result of auto-cleanup of duplicate vitals
+#[derive(Debug, Default)]
+pub struct AutoCleanupResult {
+    pub bp_deleted: usize,
+    pub hr_deleted: usize,
+}
+
+/// Automatically delete standalone vitals that duplicate exercise-linked vitals.
+/// Keeps the exercise-linked vitals (which have context like PRE/POST workout notes).
+/// Returns count of BP and HR vitals deleted.
+pub fn auto_cleanup_exercise_duplicates(
+    conn: &rusqlite::Connection,
+    time_window_minutes: i64,
+) -> Result<AutoCleanupResult, String> {
+    // Find all vitals that are in exercise-linked vital groups
+    let exercise_vitals_sql = r#"
+        SELECT v.id, v.vital_type, v.timestamp, v.value1, v.value2, v.group_id
+        FROM vitals v
+        JOIN vital_groups vg ON v.group_id = vg.id
+        JOIN exercises e ON (e.pre_vital_group_id = vg.id OR e.post_vital_group_id = vg.id)
+        WHERE v.group_id IS NOT NULL
+        AND v.vital_type IN ('blood_pressure', 'heart_rate')
+        ORDER BY v.timestamp
+    "#;
+
+    struct ExerciseVitalRef {
+        #[allow(dead_code)]
+        id: i64,
+        vital_type: String,
+        timestamp: String,
+        value1: f64,
+        value2: Option<f64>,
+        #[allow(dead_code)]
+        group_id: i64,
+    }
+
+    let mut stmt = conn.prepare(exercise_vitals_sql)
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    let exercise_vitals: Vec<ExerciseVitalRef> = stmt
+        .query_map([], |row| {
+            Ok(ExerciseVitalRef {
+                id: row.get("id")?,
+                vital_type: row.get("vital_type")?,
+                timestamp: row.get("timestamp")?,
+                value1: row.get("value1")?,
+                value2: row.get("value2")?,
+                group_id: row.get("group_id")?,
+            })
+        })
+        .map_err(|e| format!("Failed to query exercise vitals: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect exercise vitals: {}", e))?;
+
+    if exercise_vitals.is_empty() {
+        return Ok(AutoCleanupResult::default());
+    }
+
+    // Find standalone vitals (not in exercise-linked groups)
+    let standalone_sql = r#"
+        SELECT v.id, v.vital_type, v.timestamp, v.value1, v.value2, v.group_id
+        FROM vitals v
+        WHERE (v.group_id IS NULL OR v.group_id NOT IN (
+            SELECT vg.id FROM vital_groups vg
+            JOIN exercises e ON (e.pre_vital_group_id = vg.id OR e.post_vital_group_id = vg.id)
+        ))
+        AND v.vital_type IN ('blood_pressure', 'heart_rate')
+        ORDER BY v.timestamp
+    "#;
+
+    struct StandaloneVitalRef {
+        id: i64,
+        vital_type: String,
+        timestamp: String,
+        value1: f64,
+        value2: Option<f64>,
+    }
+
+    let mut standalone_stmt = conn.prepare(standalone_sql)
+        .map_err(|e| format!("Failed to prepare standalone query: {}", e))?;
+
+    let standalone_vitals: Vec<StandaloneVitalRef> = standalone_stmt
+        .query_map([], |row| {
+            Ok(StandaloneVitalRef {
+                id: row.get("id")?,
+                vital_type: row.get("vital_type")?,
+                timestamp: row.get("timestamp")?,
+                value1: row.get("value1")?,
+                value2: row.get("value2")?,
+            })
+        })
+        .map_err(|e| format!("Failed to query standalone vitals: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect standalone vitals: {}", e))?;
+
+    // Find duplicates and collect IDs to delete
+    let mut bp_to_delete = Vec::new();
+    let mut hr_to_delete = Vec::new();
+
+    for ev in &exercise_vitals {
+        let ev_ts = chrono::NaiveDateTime::parse_from_str(&ev.timestamp, "%Y-%m-%dT%H:%M:%S")
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ev.timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+            .ok();
+
+        for sv in &standalone_vitals {
+            // Must be same vital type
+            if ev.vital_type != sv.vital_type {
+                continue;
+            }
+
+            // Check if values match
+            let values_match = if ev.vital_type == "blood_pressure" {
+                ev.value1 == sv.value1 && ev.value2 == sv.value2
+            } else {
+                ev.value1 == sv.value1
+            };
+
+            if !values_match {
+                continue;
+            }
+
+            // Check timestamp within window
+            let sv_ts = chrono::NaiveDateTime::parse_from_str(&sv.timestamp, "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(&sv.timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+                .ok();
+
+            let within_window = match (ev_ts, sv_ts) {
+                (Some(e), Some(s)) => {
+                    let diff_minutes = (e - s).num_seconds().abs() as f64 / 60.0;
+                    diff_minutes <= time_window_minutes as f64
+                }
+                _ => false,
+            };
+
+            if within_window {
+                if sv.vital_type == "blood_pressure" {
+                    if !bp_to_delete.contains(&sv.id) {
+                        bp_to_delete.push(sv.id);
+                    }
+                } else {
+                    if !hr_to_delete.contains(&sv.id) {
+                        hr_to_delete.push(sv.id);
+                    }
+                }
+            }
+        }
+    }
+
+    // Delete the duplicates
+    for id in &bp_to_delete {
+        let _ = Vital::delete(conn, *id);
+    }
+    for id in &hr_to_delete {
+        let _ = Vital::delete(conn, *id);
+    }
+
+    Ok(AutoCleanupResult {
+        bp_deleted: bp_to_delete.len(),
+        hr_deleted: hr_to_delete.len(),
+    })
 }
