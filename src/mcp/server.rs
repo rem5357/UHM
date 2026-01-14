@@ -696,6 +696,20 @@ pub struct ListVitalsStatsParams {
     pub end_date: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindDuplicateVitalsParams {
+    /// Vital type to check (optional, defaults to blood_pressure and heart_rate)
+    pub vital_type: Option<String>,
+    /// Time window in minutes to consider readings as potential duplicates (default: 60)
+    pub time_window_minutes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteVitalsBulkParams {
+    /// List of vital IDs to delete
+    pub vital_ids: Vec<i64>,
+}
+
 // ============================================================================
 // Exercise Parameter Structs
 // ============================================================================
@@ -1653,6 +1667,22 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    #[tool(description = "Find potential duplicate vitals between exercise-linked groups and standalone readings. Matches by same values within a time window. Returns pairs showing the exercise vital (to keep) and standalone vital (potential duplicate). Use delete_vitals_bulk to remove confirmed duplicates.")]
+    fn find_duplicate_vitals(&self, Parameters(p): Parameters<FindDuplicateVitalsParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::find_duplicate_vitals(&self.database, p.vital_type.as_deref(), p.time_window_minutes)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Delete multiple vitals by ID. Useful for bulk removal of confirmed duplicates. Returns count of deleted, not found, and any errors.")]
+    fn delete_vitals_bulk(&self, Parameters(p): Parameters<DeleteVitalsBulkParams>) -> Result<CallToolResult, McpError> {
+        let result = vitals::delete_vitals_bulk(&self.database, &p.vital_ids)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ============================================================================
@@ -1684,8 +1714,10 @@ impl ServerHandler for UhmService {
                  Medications: add/get/list/search/update/deprecate/reactivate/delete_medication, export_medications_markdown. \
                  For medication dosage changes: deprecate old entry and add new one to preserve history. \
                  update/delete_medication require force=true. \
-                 Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals, list_vitals_stats. \
+                 Vitals: add/get/update/delete_vital, list_vitals_by_type, list_recent_vitals, list_vitals_by_date_range, get_latest_vitals, list_vitals_stats, find_duplicate_vitals, delete_vitals_bulk. \
                  list_vitals_stats: Get comprehensive vital statistics by type (mean, median, mode, SD, outliers, etc.) - much faster than processing raw data. \
+                 find_duplicate_vitals: Find potential duplicates between exercise-linked and standalone vitals (same values within time window). \
+                 delete_vitals_bulk: Delete multiple vitals by ID for confirmed duplicate removal. \
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
                  Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats. \
                  Exercise calculates calories burned using current weight and MET formula. Link PRE/POST vital groups for recovery tracking. \

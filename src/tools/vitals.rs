@@ -1356,3 +1356,274 @@ pub fn list_vitals_stats(
         }
     }
 }
+
+// ============================================================================
+// Duplicate Detection
+// ============================================================================
+
+/// A potential duplicate pair of vitals
+#[derive(Debug, Serialize)]
+pub struct DuplicatePair {
+    /// The vital in an exercise-linked group (likely the one to keep)
+    pub exercise_vital: VitalSummary,
+    /// The exercise this vital is linked to (pre or post)
+    pub exercise_context: String,
+    /// The standalone vital that may be a duplicate
+    pub standalone_vital: VitalSummary,
+    /// Time difference in minutes between the two readings
+    pub time_diff_minutes: f64,
+    /// Whether the values match exactly
+    pub values_match: bool,
+}
+
+/// Response for find_duplicate_vitals
+#[derive(Debug, Serialize)]
+pub struct FindDuplicateVitalsResponse {
+    pub duplicate_pairs: Vec<DuplicatePair>,
+    pub total_found: usize,
+    pub exercise_vitals_checked: i64,
+    pub standalone_vitals_checked: i64,
+    pub time_window_minutes: i64,
+}
+
+/// Find potential duplicate BP/HR vitals between exercise groups and standalone readings
+pub fn find_duplicate_vitals(
+    db: &Database,
+    vital_type: Option<&str>,
+    time_window_minutes: Option<i64>,
+) -> Result<FindDuplicateVitalsResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+    let window = time_window_minutes.unwrap_or(60); // Default 60 minute window
+
+    // Filter by vital type if specified (default to BP and HR which are most common with exercises)
+    let type_filter = match vital_type {
+        Some(t) => {
+            let vt = VitalType::from_str(t)
+                .ok_or_else(|| format!("Invalid vital type: '{}'", t))?;
+            format!("AND v.vital_type = '{}'", vt.as_str())
+        }
+        None => "AND v.vital_type IN ('blood_pressure', 'heart_rate')".to_string(),
+    };
+
+    // Find all vitals that are in exercise-linked vital groups
+    let exercise_vitals_sql = format!(
+        r#"
+        SELECT v.*,
+               CASE
+                   WHEN e.pre_vital_group_id = v.group_id THEN 'PRE'
+                   WHEN e.post_vital_group_id = v.group_id THEN 'POST'
+               END as exercise_context,
+               e.id as exercise_id,
+               e.exercise_type,
+               e.timestamp as exercise_timestamp
+        FROM vitals v
+        JOIN vital_groups vg ON v.group_id = vg.id
+        JOIN exercises e ON (e.pre_vital_group_id = vg.id OR e.post_vital_group_id = vg.id)
+        WHERE v.group_id IS NOT NULL
+        {}
+        ORDER BY v.timestamp
+        "#,
+        type_filter
+    );
+
+    let mut exercise_stmt = conn.prepare(&exercise_vitals_sql)
+        .map_err(|e| format!("Failed to prepare query: {}", e))?;
+
+    struct ExerciseVital {
+        vital: Vital,
+        exercise_context: String,
+        exercise_id: i64,
+        exercise_type: String,
+        exercise_timestamp: String,
+    }
+
+    let exercise_vitals: Vec<ExerciseVital> = exercise_stmt
+        .query_map([], |row| {
+            let vital_type_str: String = row.get("vital_type")?;
+            let vital_type = VitalType::from_str(&vital_type_str)
+                .unwrap_or(VitalType::Weight);
+
+            Ok(ExerciseVital {
+                vital: Vital {
+                    id: row.get("id")?,
+                    vital_type,
+                    timestamp: row.get("timestamp")?,
+                    value1: row.get("value1")?,
+                    value2: row.get("value2")?,
+                    unit: row.get("unit")?,
+                    group_id: row.get("group_id")?,
+                    notes: row.get("notes")?,
+                    created_at: row.get("created_at")?,
+                    updated_at: row.get("updated_at")?,
+                },
+                exercise_context: row.get("exercise_context")?,
+                exercise_id: row.get("exercise_id")?,
+                exercise_type: row.get("exercise_type")?,
+                exercise_timestamp: row.get("exercise_timestamp")?,
+            })
+        })
+        .map_err(|e| format!("Failed to query exercise vitals: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect exercise vitals: {}", e))?;
+
+    let exercise_vitals_count = exercise_vitals.len() as i64;
+
+    // Collect group IDs that are linked to exercises (for reference)
+    let _exercise_group_ids: Vec<i64> = exercise_vitals
+        .iter()
+        .filter_map(|ev| ev.vital.group_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Find standalone vitals (not in exercise-linked groups)
+    let standalone_sql = format!(
+        r#"
+        SELECT * FROM vitals v
+        WHERE (v.group_id IS NULL OR v.group_id NOT IN (
+            SELECT vg.id FROM vital_groups vg
+            JOIN exercises e ON (e.pre_vital_group_id = vg.id OR e.post_vital_group_id = vg.id)
+        ))
+        {}
+        ORDER BY v.timestamp
+        "#,
+        type_filter
+    );
+
+    let mut standalone_stmt = conn.prepare(&standalone_sql)
+        .map_err(|e| format!("Failed to prepare standalone query: {}", e))?;
+
+    let standalone_vitals: Vec<Vital> = standalone_stmt
+        .query_map([], |row| {
+            let vital_type_str: String = row.get("vital_type")?;
+            let vital_type = VitalType::from_str(&vital_type_str)
+                .unwrap_or(VitalType::Weight);
+
+            Ok(Vital {
+                id: row.get("id")?,
+                vital_type,
+                timestamp: row.get("timestamp")?,
+                value1: row.get("value1")?,
+                value2: row.get("value2")?,
+                unit: row.get("unit")?,
+                group_id: row.get("group_id")?,
+                notes: row.get("notes")?,
+                created_at: row.get("created_at")?,
+                updated_at: row.get("updated_at")?,
+            })
+        })
+        .map_err(|e| format!("Failed to query standalone vitals: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect standalone vitals: {}", e))?;
+
+    let standalone_vitals_count = standalone_vitals.len() as i64;
+
+    // Find duplicates by matching values and timestamps within window
+    let mut duplicate_pairs = Vec::new();
+
+    for ev in &exercise_vitals {
+        let ev_ts = chrono::NaiveDateTime::parse_from_str(&ev.vital.timestamp, "%Y-%m-%dT%H:%M:%S")
+            .or_else(|_| chrono::NaiveDateTime::parse_from_str(&ev.vital.timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+            .ok();
+
+        for sv in &standalone_vitals {
+            // Skip if different vital types
+            if ev.vital.vital_type != sv.vital_type {
+                continue;
+            }
+
+            // Check if values match
+            let values_match = match ev.vital.vital_type {
+                VitalType::BloodPressure => {
+                    ev.vital.value1 == sv.value1 && ev.vital.value2 == sv.value2
+                }
+                _ => ev.vital.value1 == sv.value1,
+            };
+
+            // Parse timestamps and check time difference
+            let sv_ts = chrono::NaiveDateTime::parse_from_str(&sv.timestamp, "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(&sv.timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+                .ok();
+
+            let time_diff_minutes = match (ev_ts, sv_ts) {
+                (Some(e), Some(s)) => {
+                    let diff = (e - s).num_seconds().abs() as f64 / 60.0;
+                    diff
+                }
+                _ => f64::MAX, // Can't compare, skip
+            };
+
+            // If values match and within time window, it's a potential duplicate
+            if values_match && time_diff_minutes <= window as f64 {
+                duplicate_pairs.push(DuplicatePair {
+                    exercise_vital: VitalSummary::from(&ev.vital),
+                    exercise_context: format!(
+                        "{} exercise #{} ({}) at {}",
+                        ev.exercise_context,
+                        ev.exercise_id,
+                        ev.exercise_type,
+                        ev.exercise_timestamp
+                    ),
+                    standalone_vital: VitalSummary::from(sv),
+                    time_diff_minutes: (time_diff_minutes * 10.0).round() / 10.0,
+                    values_match,
+                });
+            }
+        }
+    }
+
+    let total_found = duplicate_pairs.len();
+
+    Ok(FindDuplicateVitalsResponse {
+        duplicate_pairs,
+        total_found,
+        exercise_vitals_checked: exercise_vitals_count,
+        standalone_vitals_checked: standalone_vitals_count,
+        time_window_minutes: window,
+    })
+}
+
+/// Delete multiple vitals by ID (for bulk duplicate removal)
+pub fn delete_vitals_bulk(
+    db: &Database,
+    vital_ids: &[i64],
+) -> Result<BulkDeleteResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let mut deleted = Vec::new();
+    let mut not_found = Vec::new();
+    let mut errors = Vec::new();
+
+    for &id in vital_ids {
+        // Check if vital exists
+        match Vital::get_by_id(&conn, id) {
+            Ok(Some(_)) => {
+                match Vital::delete(&conn, id) {
+                    Ok(true) => deleted.push(id),
+                    Ok(false) => not_found.push(id),
+                    Err(e) => errors.push(format!("ID {}: {}", id, e)),
+                }
+            }
+            Ok(None) => not_found.push(id),
+            Err(e) => errors.push(format!("ID {}: {}", id, e)),
+        }
+    }
+
+    Ok(BulkDeleteResponse {
+        success: errors.is_empty() && not_found.is_empty(),
+        deleted_count: deleted.len(),
+        deleted_ids: deleted,
+        not_found_ids: not_found,
+        errors,
+    })
+}
+
+/// Response for bulk delete
+#[derive(Debug, Serialize)]
+pub struct BulkDeleteResponse {
+    pub success: bool,
+    pub deleted_count: usize,
+    pub deleted_ids: Vec<i64>,
+    pub not_found_ids: Vec<i64>,
+    pub errors: Vec<String>,
+}
