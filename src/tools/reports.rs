@@ -263,12 +263,18 @@ pub fn generate_bp_chart(daily_stats: &[DailyBPStats], width: u32, height: u32) 
             )
             .map_err(|e| e.to_string())?;
 
+        // Pre-compute date labels to avoid closure issues with large datasets
+        let date_labels: Vec<String> = daily_stats.iter()
+            .map(|s| s.date.split('-').skip(1).collect::<Vec<_>>().join("/"))
+            .collect();
+        let labels_len = date_labels.len();
+
         chart.configure_mesh()
             .x_labels(daily_stats.len().min(10))
             .x_label_formatter(&|x| {
-                if *x >= 0 && (*x as usize) < daily_stats.len() {
-                    let date = &daily_stats[*x as usize].date;
-                    date.split('-').skip(1).collect::<Vec<_>>().join("/")
+                let idx = *x as usize;
+                if idx < labels_len {
+                    date_labels[idx].clone()
                 } else {
                     String::new()
                 }
@@ -335,9 +341,12 @@ pub fn generate_bp_chart(daily_stats: &[DailyBPStats], width: u32, height: u32) 
         .label("Systolic (avg)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED.stroke_width(2)));
 
-        chart.draw_series(systolic_points.iter().map(|(x, y)| {
-            Circle::new((*x, *y), 3, RED.filled())
-        })).map_err(|e| e.to_string())?;
+        // Only show data point markers for reports of 31 days or less
+        if daily_stats.len() <= 31 {
+            chart.draw_series(systolic_points.iter().map(|(x, y)| {
+                Circle::new((*x, *y), 3, RED.filled())
+            })).map_err(|e| e.to_string())?;
+        }
 
         // Diastolic average line
         let diastolic_points: Vec<(i32, f64)> = daily_stats.iter()
@@ -353,9 +362,12 @@ pub fn generate_bp_chart(daily_stats: &[DailyBPStats], width: u32, height: u32) 
         .label("Diastolic (avg)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE.stroke_width(2)));
 
-        chart.draw_series(diastolic_points.iter().map(|(x, y)| {
-            Circle::new((*x, *y), 3, BLUE.filled())
-        })).map_err(|e| e.to_string())?;
+        // Only show data point markers for reports of 31 days or less
+        if daily_stats.len() <= 31 {
+            chart.draw_series(diastolic_points.iter().map(|(x, y)| {
+                Circle::new((*x, *y), 3, BLUE.filled())
+            })).map_err(|e| e.to_string())?;
+        }
 
         chart.configure_series_labels()
             .position(SeriesLabelPosition::UpperRight)
@@ -414,12 +426,18 @@ pub fn generate_hr_chart(daily_stats: &[DailyHRStats], width: u32, height: u32) 
             )
             .map_err(|e| e.to_string())?;
 
+        // Pre-compute date labels to avoid closure issues with large datasets
+        let date_labels: Vec<String> = daily_stats.iter()
+            .map(|s| s.date.split('-').skip(1).collect::<Vec<_>>().join("/"))
+            .collect();
+        let labels_len = date_labels.len();
+
         chart.configure_mesh()
             .x_labels(daily_stats.len().min(10))
             .x_label_formatter(&|x| {
-                if *x >= 0 && (*x as usize) < daily_stats.len() {
-                    let date = &daily_stats[*x as usize].date;
-                    date.split('-').skip(1).collect::<Vec<_>>().join("/")
+                let idx = *x as usize;
+                if idx < labels_len {
+                    date_labels[idx].clone()
                 } else {
                     String::new()
                 }
@@ -475,9 +493,12 @@ pub fn generate_hr_chart(daily_stats: &[DailyHRStats], width: u32, height: u32) 
         .label("Heart Rate (avg)")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(112, 48, 160).stroke_width(2)));
 
-        chart.draw_series(hr_points.iter().map(|(x, y)| {
-            Circle::new((*x, *y), 4, RGBColor(112, 48, 160).filled())
-        })).map_err(|e| e.to_string())?;
+        // Only show data point markers for reports of 31 days or less
+        if daily_stats.len() <= 31 {
+            chart.draw_series(hr_points.iter().map(|(x, y)| {
+                Circle::new((*x, *y), 4, RGBColor(112, 48, 160).filled())
+            })).map_err(|e| e.to_string())?;
+        }
 
         chart.configure_series_labels()
             .position(SeriesLabelPosition::UpperRight)
@@ -1005,5 +1026,261 @@ pub fn generate_hr_report(
         days_analyzed,
         date_range: format!("{} to {}", start_date, end_date),
         message: format!("HR report generated successfully with {} readings over {} days", total_readings, days_analyzed),
+    })
+}
+
+// ============================================================================
+// Weight Report Generation
+// ============================================================================
+
+/// Daily weight data point
+#[derive(Debug, Clone)]
+struct DailyWeight {
+    date: String,
+    weight: f64,
+}
+
+/// Generate Weight trend chart as PNG bytes
+pub fn generate_weight_chart(daily_weights: &[DailyWeight], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use plotters::prelude::*;
+
+    if daily_weights.is_empty() {
+        return Err("No data to chart".to_string());
+    }
+
+    let mut buffer = vec![0u8; (width * height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (width, height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| e.to_string())?;
+
+        // Calculate Y axis range with some padding
+        let weight_min = daily_weights.iter()
+            .map(|w| w.weight)
+            .fold(f64::INFINITY, f64::min);
+        let weight_max = daily_weights.iter()
+            .map(|w| w.weight)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        // Add 5 lbs padding on each side, round to nearest 5
+        let y_min = ((weight_min - 5.0) / 5.0).floor() * 5.0;
+        let y_max = ((weight_max + 5.0) / 5.0).ceil() * 5.0;
+
+        let mut chart = ChartBuilder::on(&root)
+            .margin(20)
+            .x_label_area_size(40)
+            .y_label_area_size(60)
+            .build_cartesian_2d(
+                0..(daily_weights.len() as i32),
+                y_min..y_max
+            )
+            .map_err(|e| e.to_string())?;
+
+        // Limit labels to avoid crowding, max 10 for readability
+        let num_labels = daily_weights.len().min(10);
+
+        // Pre-compute date labels to avoid closure issues with large datasets
+        let date_labels: Vec<String> = daily_weights.iter().map(|w| {
+            let parts: Vec<&str> = w.date.split('-').collect();
+            if parts.len() == 3 {
+                format!("{}/{}", parts[1], parts[2])
+            } else {
+                w.date.clone()
+            }
+        }).collect();
+        let labels_len = date_labels.len();
+
+        chart.configure_mesh()
+            .x_labels(num_labels)
+            .x_label_formatter(&|x| {
+                let idx = *x as usize;
+                if idx < labels_len {
+                    date_labels[idx].clone()
+                } else {
+                    String::new()
+                }
+            })
+            .y_desc("Weight (lbs)")
+            .y_label_formatter(&|y| format!("{:.0}", y))
+            .draw()
+            .map_err(|e| format!("Chart mesh error: {}", e))?;
+
+        // Weight line - green color
+        let weight_points: Vec<(i32, f64)> = daily_weights.iter()
+            .enumerate()
+            .map(|(i, w)| (i as i32, w.weight))
+            .collect();
+
+        chart.draw_series(LineSeries::new(
+            weight_points.clone(),
+            RGBColor(0, 128, 0).stroke_width(2),
+        ))
+        .map_err(|e| e.to_string())?
+        .label("Weight")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RGBColor(0, 128, 0).stroke_width(2)));
+
+        // Only show data point markers for reports of 31 days or less
+        if daily_weights.len() <= 31 {
+            chart.draw_series(weight_points.iter().map(|(x, y)| {
+                Circle::new((*x, *y), 4, RGBColor(0, 128, 0).filled())
+            })).map_err(|e| e.to_string())?;
+        }
+
+        chart.configure_series_labels()
+            .position(SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
+            .draw()
+            .map_err(|e| e.to_string())?;
+
+        root.present().map_err(|e| e.to_string())?;
+    }
+
+    // Convert RGB buffer to PNG
+    let img = RgbImage::from_raw(width, height, buffer)
+        .ok_or("Failed to create image from buffer")?;
+
+    let mut png_bytes = Vec::new();
+    let dyn_img = DynamicImage::ImageRgb8(img);
+    dyn_img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+
+    Ok(png_bytes)
+}
+
+/// Generate a Weight PDF report (single landscape page with chart)
+pub fn generate_weight_report(
+    db: &Database,
+    start_date: &str,
+    end_date: &str,
+    output_path: &str,
+) -> Result<GenerateReportResponse, String> {
+    let conn = db.get_conn().map_err(|e| e.to_string())?;
+
+    // Get patient info
+    let patient = PatientInfo::get(&conn)
+        .map_err(|e| e.to_string())?
+        .ok_or("Patient info not set. Please call set_patient_info first.")?;
+
+    // Fetch weight vitals for date range
+    let start_ts = format!("{}T00:00:00", start_date);
+    let end_ts = format!("{}T23:59:59", end_date);
+
+    let vitals = Vital::list_by_date_range(&conn, &start_ts, &end_ts, Some(VitalType::Weight))
+        .map_err(|e| e.to_string())?;
+
+    if vitals.is_empty() {
+        return Err(format!("No weight readings found between {} and {}", start_date, end_date));
+    }
+
+    // Group by date and take the average if multiple readings per day
+    let mut by_date: std::collections::BTreeMap<String, Vec<f64>> = std::collections::BTreeMap::new();
+    for vital in &vitals {
+        let date = vital.timestamp.split('T').next().unwrap_or(&vital.timestamp);
+        by_date.entry(date.to_string()).or_default().push(vital.value1);
+    }
+
+    let daily_weights: Vec<DailyWeight> = by_date.iter()
+        .map(|(date, weights)| {
+            let avg = weights.iter().sum::<f64>() / weights.len() as f64;
+            DailyWeight {
+                date: date.clone(),
+                weight: avg,
+            }
+        })
+        .collect();
+
+    let total_readings = vitals.len() as i64;
+    let days_analyzed = daily_weights.len() as i64;
+
+    // Calculate stats
+    let weight_min = daily_weights.iter().map(|w| w.weight).fold(f64::INFINITY, f64::min);
+    let weight_max = daily_weights.iter().map(|w| w.weight).fold(f64::NEG_INFINITY, f64::max);
+    let weight_avg = daily_weights.iter().map(|w| w.weight).sum::<f64>() / days_analyzed as f64;
+    let weight_change = daily_weights.last().map(|w| w.weight).unwrap_or(0.0)
+                      - daily_weights.first().map(|w| w.weight).unwrap_or(0.0);
+
+    // Create PDF - Single Landscape Page
+    let (doc, page1, layer1) = PdfDocument::new(
+        "Weight Report",
+        Mm(279.4),  // Landscape width
+        Mm(215.9),  // Landscape height
+        "Layer 1",
+    );
+
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| e.to_string())?;
+    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| e.to_string())?;
+
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    let page_height = 215.9;
+    let margin_left = 15.0;
+    let mut y = page_height - 15.0;
+
+    // Title
+    add_text(&layer, &font_bold, "Weight Report", Mm(margin_left), Mm(y), 18.0, (0, 128, 0));
+    add_text(&layer, &font, &format!("{} - {}", start_date, end_date), Mm(100.0), Mm(y), 11.0, COLOR_BLACK);
+    y -= 8.0;
+
+    // Patient info line
+    add_text(&layer, &font, &format!("Patient: {}", patient.name), Mm(margin_left), Mm(y), 10.0, COLOR_BLACK);
+    add_text(&layer, &font, &format!("DOB: {}", patient.dob), Mm(100.0), Mm(y), 10.0, COLOR_BLACK);
+    let now = chrono::Local::now().format("%Y-%m-%d").to_string();
+    add_text(&layer, &font, &format!("Generated: {}", now), Mm(180.0), Mm(y), 10.0, COLOR_BLACK);
+    y -= 6.0;
+
+    // Summary stats on one line
+    add_text(&layer, &font, &format!("Readings: {}", total_readings), Mm(margin_left), Mm(y), 10.0, COLOR_BLACK);
+    add_text(&layer, &font, &format!("Days: {}", days_analyzed), Mm(55.0), Mm(y), 10.0, COLOR_BLACK);
+    add_text(&layer, &font, &format!("Avg: {:.1} lbs", weight_avg), Mm(90.0), Mm(y), 10.0, COLOR_BLACK);
+    add_text(&layer, &font, &format!("Range: {:.1} - {:.1} lbs", weight_min, weight_max), Mm(140.0), Mm(y), 10.0, COLOR_BLACK);
+
+    let change_color = if weight_change < 0.0 { COLOR_NORMAL } else if weight_change > 0.0 { COLOR_HIGH } else { COLOR_BLACK };
+    let change_str = if weight_change >= 0.0 { format!("+{:.1}", weight_change) } else { format!("{:.1}", weight_change) };
+    add_text(&layer, &font, &format!("Change: {} lbs", change_str), Mm(220.0), Mm(y), 10.0, change_color);
+    y -= 8.0;
+
+    // Generate and embed chart
+    match generate_weight_chart(&daily_weights, 1100, 450) {
+        Ok(png_bytes) => {
+            let dynamic_image = printpdf::image_crate::load_from_memory(&png_bytes)
+                .map_err(|e| e.to_string())?;
+            let pdf_image = Image::from_dynamic_image(&dynamic_image);
+
+            let transform = ImageTransform {
+                translate_x: Some(Mm(margin_left)),
+                translate_y: Some(Mm(y - 145.0)),
+                dpi: Some(110.0),
+                ..Default::default()
+            };
+
+            pdf_image.add_to_layer(layer.clone(), transform);
+        }
+        Err(e) => {
+            add_text(&layer, &font, &format!("Chart generation error: {}", e), Mm(margin_left), Mm(y - 10.0), 9.0, COLOR_HIGH);
+        }
+    }
+
+    // Save PDF
+    let path = Path::new(output_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    let file = File::create(path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(file);
+    doc.save(&mut writer).map_err(|e| e.to_string())?;
+
+    Ok(GenerateReportResponse {
+        success: true,
+        file_path: output_path.to_string(),
+        total_readings,
+        days_analyzed,
+        date_range: format!("{} to {}", start_date, end_date),
+        message: format!("Weight report generated successfully with {} readings over {} days. Change: {} lbs",
+                        total_readings, days_analyzed, change_str),
     })
 }

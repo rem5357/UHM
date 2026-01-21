@@ -773,6 +773,16 @@ pub struct GenerateHRReportParams {
     pub notes: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateWeightReportParams {
+    /// Start date in YYYY-MM-DD format
+    pub start_date: String,
+    /// End date in YYYY-MM-DD format
+    pub end_date: String,
+    /// Full path for PDF output. If not provided, saves to C:\Users\rober\Downloads with auto-generated name.
+    pub output_path: Option<String>,
+}
+
 // ============================================================================
 // Exercise Parameter Structs
 // ============================================================================
@@ -1875,6 +1885,21 @@ impl UhmService {
             &p.end_date,
             &output_path,
             p.notes,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Generate a Weight PDF report with trend chart. Single landscape page showing weight over time with summary statistics.")]
+    fn generate_weight_report(&self, Parameters(p): Parameters<GenerateWeightReportParams>) -> Result<CallToolResult, McpError> {
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\Weight_Report_{}_{}.pdf", p.start_date, p.end_date)
+        });
+        let result = reports::generate_weight_report(
+            &self.database,
+            &p.start_date,
+            &p.end_date,
+            &output_path,
         ).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
