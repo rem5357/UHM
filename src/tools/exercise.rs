@@ -523,6 +523,60 @@ pub fn delete_exercise_segment(db: &Database, id: i64) -> Result<DeleteResponse,
     })
 }
 
+/// Response for recalculate operation
+#[derive(Debug, Serialize)]
+pub struct RecalculateResponse {
+    pub exercise_id: i64,
+    pub segments_updated: usize,
+    pub old_total_calories: f64,
+    pub new_total_calories: f64,
+    pub segments: Vec<SegmentDetail>,
+}
+
+/// Recalculate calories for all segments of an exercise using the current formula
+pub fn recalculate_exercise_calories(db: &Database, exercise_id: i64) -> Result<RecalculateResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Get old totals
+    let old_exercise = Exercise::get_by_id(&conn, exercise_id)
+        .map_err(|e| format!("Database error: {}", e))?
+        .ok_or_else(|| format!("Exercise not found with id: {}", exercise_id))?;
+
+    let old_total = old_exercise.cached_calories_burned;
+
+    // Recalculate all segments
+    let updated_segments = ExerciseSegment::recalculate_all_calories_for_exercise(&conn, exercise_id)
+        .map_err(|e| format!("Failed to recalculate: {}", e))?;
+
+    // Get new totals
+    let new_exercise = Exercise::get_by_id(&conn, exercise_id)
+        .map_err(|e| format!("Database error: {}", e))?
+        .unwrap();
+
+    let segment_details: Vec<SegmentDetail> = updated_segments.iter().map(|s| SegmentDetail {
+        id: s.id,
+        segment_order: s.segment_order,
+        duration_minutes: s.duration_minutes,
+        speed_mph: s.speed_mph,
+        distance_miles: s.distance_miles,
+        incline_percent: s.incline_percent,
+        calculated_field: s.calculated_field.as_str().to_string(),
+        is_consistent: s.is_consistent,
+        calories_burned: s.calories_burned,
+        weight_used_lbs: s.weight_used_lbs,
+        avg_heart_rate: s.avg_heart_rate,
+        notes: s.notes.clone(),
+    }).collect();
+
+    Ok(RecalculateResponse {
+        exercise_id,
+        segments_updated: updated_segments.len(),
+        old_total_calories: old_total,
+        new_total_calories: new_exercise.cached_calories_burned,
+        segments: segment_details,
+    })
+}
+
 // ============================================================================
 // Exercise Statistics
 // ============================================================================

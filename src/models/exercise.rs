@@ -545,6 +545,49 @@ impl ExerciseSegment {
 
         Ok(rows > 0)
     }
+
+    /// Recalculate calories for a segment based on current formula
+    pub fn recalculate_calories(conn: &Connection, id: i64) -> DbResult<Option<Self>> {
+        let current = match Self::get_by_id(conn, id)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Get current weight for calorie calculation
+        let weight_lbs = get_latest_weight(conn)?;
+
+        // Recalculate calories with current formula
+        let calories = calculate_calories_burned(
+            current.duration_minutes,
+            current.speed_mph,
+            current.incline_percent,
+            weight_lbs,
+        );
+
+        conn.execute(
+            "UPDATE exercise_segments SET calories_burned = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![calories, id],
+        )?;
+
+        // Recalculate exercise totals
+        Exercise::recalculate_totals(conn, current.exercise_id)?;
+
+        Self::get_by_id(conn, id)
+    }
+
+    /// Recalculate calories for all segments of an exercise
+    pub fn recalculate_all_calories_for_exercise(conn: &Connection, exercise_id: i64) -> DbResult<Vec<Self>> {
+        let segments = Self::list_for_exercise(conn, exercise_id)?;
+        let mut updated = Vec::new();
+
+        for segment in segments {
+            if let Some(s) = Self::recalculate_calories(conn, segment.id)? {
+                updated.push(s);
+            }
+        }
+
+        Ok(updated)
+    }
 }
 
 /// Calculate the missing value from the other two (distance = speed × time)
@@ -652,8 +695,10 @@ fn calculate_calories_burned(
         12.8 // 9.0+ mph
     };
 
-    // Add incline adjustment (~0.1 MET per 1% grade at walking speeds)
-    let incline_adjustment = incline_percent * 0.1;
+    // ACSM walking equation incline component: 1.8 × speed(m/min) × grade
+    // Converted to: 0.138 × speed_mph × incline_percent
+    // This makes incline effect speed-dependent (faster = more impact from incline)
+    let incline_adjustment = 0.138 * speed * incline_percent;
     let met = base_met + incline_adjustment;
 
     // Calculate calories: MET × weight_kg × duration_hours

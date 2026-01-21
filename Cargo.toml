@@ -5,6 +5,22 @@ edition = "2021"
 description = "Universal Health Manager - MCP server for health and nutrition tracking"
 authors = ["Robert"]
 
+[lib]
+name = "uhm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uhm"
+path = "src/main.rs"
+
+[[bin]]
+name = "recalculate_exercises"
+path = "src/bin/recalculate_exercises.rs"
+
+[[bin]]
+name = "set_patient_info"
+path = "src/bin/set_patient_info.rs"
+
 [dependencies]
 # MCP
 rmcp = { version = "0.8", features = ["server"] }
@@ -28,6 +44,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # System info for status tool
 sysinfo = "0.31"
+
+# PDF generation
+printpdf = { version = "0.7", features = ["embedded_images"] }
+
+# Charts
+plotters = "0.3"
+plotters-bitmap = "0.3"
+
+# Image handling for embedding charts in PDF
+image = "0.25"
 
 [build-dependencies]
 chrono = "0.4"

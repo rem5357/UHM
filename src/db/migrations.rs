@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -58,6 +58,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 6 {
         migrate_v6(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (6)", [])?;
+    }
+
+    if current_version < 7 {
+        migrate_v7(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
     }
 
     Ok(())
@@ -544,6 +549,27 @@ fn migrate_v6(conn: &Connection) -> DbResult<()> {
         -- Add cached exercise calories to days
         -- ============================================
         ALTER TABLE days ADD COLUMN cached_calories_burned REAL NOT NULL DEFAULT 0;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v7: Patient info for reports
+fn migrate_v7(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- PATIENT INFO
+        -- Single-row table for report headers
+        -- ============================================
+        CREATE TABLE patient_info (
+            id INTEGER PRIMARY KEY CHECK (id = 1),  -- Single row only
+            name TEXT NOT NULL,
+            dob TEXT NOT NULL,  -- ISO format YYYY-MM-DD
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         "#,
     )?;
 

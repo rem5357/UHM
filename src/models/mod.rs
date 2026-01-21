@@ -8,6 +8,7 @@ mod food_item;
 mod meal_entry;
 mod medication;
 mod nutrition;
+mod patient;
 mod recipe;
 mod recipe_component;
 mod recipe_ingredient;
@@ -37,6 +38,7 @@ pub use recipe_ingredient::{
 pub use vital::{
     Vital, VitalCreate, VitalGroup, VitalGroupCreate, VitalType, VitalUpdate,
 };
+pub use patient::PatientInfo;
 pub use exercise::{
     Exercise, ExerciseCreate, ExerciseUpdate, ExerciseSegment,
     ExerciseSegmentCreate, ExerciseSegmentUpdate, ExerciseType, CalculatedField,

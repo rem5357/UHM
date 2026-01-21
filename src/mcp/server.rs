@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::db::Database;
 use crate::models::{
-    FoodItemCreate, FoodItemUpdate, Preference,
+    FoodItemCreate, FoodItemUpdate, Preference, PatientInfo,
     RecipeCreate, RecipeUpdate, RecipeIngredientCreate, RecipeIngredientUpdate,
     RecipeComponentCreate, RecipeComponentUpdate,
     MedicationCreate, MedicationUpdate, MedType, DosageUnit,
@@ -27,6 +27,7 @@ use crate::tools::exercise;
 use crate::tools::food_items;
 use crate::tools::medications;
 use crate::tools::recipes;
+use crate::tools::reports;
 use crate::tools::status::StatusTracker;
 use crate::tools::vitals;
 
@@ -737,6 +738,42 @@ pub struct DeleteVitalsBulkParams {
 }
 
 // ============================================================================
+// Report Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetPatientInfoParams {
+    /// Patient name for report headers
+    pub name: String,
+    /// Date of birth in YYYY-MM-DD format
+    pub dob: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateBPReportParams {
+    /// Start date in YYYY-MM-DD format
+    pub start_date: String,
+    /// End date in YYYY-MM-DD format
+    pub end_date: String,
+    /// Full path for PDF output. If not provided, saves to C:\Users\rober\Downloads with auto-generated name.
+    pub output_path: Option<String>,
+    /// Optional clinical notes to include in the report
+    pub notes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateHRReportParams {
+    /// Start date in YYYY-MM-DD format
+    pub start_date: String,
+    /// End date in YYYY-MM-DD format
+    pub end_date: String,
+    /// Full path for PDF output. If not provided, saves to C:\Users\rober\Downloads with auto-generated name.
+    pub output_path: Option<String>,
+    /// Optional clinical notes to include in the report
+    pub notes: Option<Vec<String>>,
+}
+
+// ============================================================================
 // Exercise Parameter Structs
 // ============================================================================
 
@@ -837,6 +874,12 @@ pub struct UpdateExerciseSegmentParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteExerciseSegmentParams {
     pub id: i64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecalculateExerciseCaloriesParams {
+    /// Exercise ID to recalculate calories for
+    pub exercise_id: i64,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1528,6 +1571,14 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Recalculate calories for all segments of an exercise using the current formula. Use after formula updates or weight changes.")]
+    fn recalculate_exercise_calories(&self, Parameters(p): Parameters<RecalculateExerciseCaloriesParams>) -> Result<CallToolResult, McpError> {
+        let result = exercise::recalculate_exercise_calories(&self.database, p.exercise_id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Get comprehensive statistics for exercises. Returns mean, median, mode, SD, min, max, percentiles, and outliers for duration, distance, calories, speed, and incline.")]
     fn list_exercise_stats(&self, Parameters(p): Parameters<ListExerciseStatsParams>) -> Result<CallToolResult, McpError> {
         let result = exercise::list_exercise_stats(&self.database, p.start_date.as_deref(), p.end_date.as_deref())
@@ -1765,6 +1816,69 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // ========================================================================
+    // Report Tools
+    // ========================================================================
+
+    #[tool(description = "Set or update patient information (name and DOB) used in PDF report headers. Must be called before generating reports.")]
+    fn set_patient_info(&self, Parameters(p): Parameters<SetPatientInfoParams>) -> Result<CallToolResult, McpError> {
+        let conn = self.database.get_conn()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let patient = PatientInfo::set(&conn, &p.name, &p.dob)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&patient).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Get current patient information stored for report headers")]
+    fn get_patient_info(&self) -> Result<CallToolResult, McpError> {
+        let conn = self.database.get_conn()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let patient = PatientInfo::get(&conn)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        match patient {
+            Some(p) => {
+                let json = serde_json::to_string_pretty(&p).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                Ok(CallToolResult::success(vec![Content::text(json)]))
+            }
+            None => {
+                Ok(CallToolResult::success(vec![Content::text(r#"{"message": "No patient info set. Call set_patient_info first."}"#.to_string())]))
+            }
+        }
+    }
+
+    #[tool(description = "Generate a Blood Pressure PDF report with daily statistics table and trend chart. Includes header with patient info, summary statistics, color-coded daily data, and graphical trend visualization.")]
+    fn generate_bp_report(&self, Parameters(p): Parameters<GenerateBPReportParams>) -> Result<CallToolResult, McpError> {
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\BP_Report_{}_{}.pdf", p.start_date, p.end_date)
+        });
+        let result = reports::generate_bp_report(
+            &self.database,
+            &p.start_date,
+            &p.end_date,
+            &output_path,
+            p.notes,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Generate a Heart Rate PDF report with daily statistics table and trend chart. Includes header with patient info, summary statistics, color-coded daily data, and graphical trend visualization.")]
+    fn generate_hr_report(&self, Parameters(p): Parameters<GenerateHRReportParams>) -> Result<CallToolResult, McpError> {
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\HR_Report_{}_{}.pdf", p.start_date, p.end_date)
+        });
+        let result = reports::generate_hr_report(
+            &self.database,
+            &p.start_date,
+            &p.end_date,
+            &output_path,
+            p.notes,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
 }
 
 // ============================================================================
@@ -1801,8 +1915,10 @@ impl ServerHandler for UhmService {
                  find_duplicate_vitals: Find potential duplicates between exercise-linked and standalone vitals (same values within time window). \
                  delete_vitals_bulk: Delete multiple vitals by ID for confirmed duplicate removal. \
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
-                 Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats. \
-                 Exercise calculates calories burned using current weight and MET formula. Link PRE/POST vital groups for recovery tracking. \
+                 Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats, recalculate_exercise_calories. \
+                 Exercise calculates calories burned using current weight, speed, incline, and ACSM MET formula. Link PRE/POST vital groups for recovery tracking. \
+                 Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report. \
+                 PDF reports include patient header, summary stats, color-coded daily tables, and trend charts. \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),
             ),
