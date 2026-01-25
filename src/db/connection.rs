@@ -42,10 +42,11 @@ impl Database {
                     | OpenFlags::SQLITE_OPEN_URI,
             )
             .with_init(|conn| {
-                // Enable foreign keys
+                // Enable foreign keys and concurrent access settings
                 conn.execute_batch(
                     "PRAGMA foreign_keys = ON;
                      PRAGMA journal_mode = WAL;
+                     PRAGMA busy_timeout = 5000;
                      PRAGMA synchronous = NORMAL;
                      PRAGMA cache_size = -64000;
                      PRAGMA temp_store = MEMORY;",
