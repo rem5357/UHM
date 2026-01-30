@@ -412,7 +412,7 @@ impl MealEntry {
     }
 }
 
-/// Calculate total nutrition for a day from meal entries
+/// Calculate total nutrition for a day from meal entries (uses cached values)
 pub fn calculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nutrition> {
     let entries = MealEntry::get_for_day(conn, day_id)?;
 
@@ -424,9 +424,75 @@ pub fn calculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nutri
     Ok(total)
 }
 
-/// Recalculate and update cached nutrition for a day
-pub fn recalculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nutrition> {
-    let nutrition = calculate_day_nutrition(conn, day_id)?;
-    Day::update_cached_nutrition(conn, day_id, &nutrition)?;
+/// Refresh a meal entry's cached nutrition from its source (recipe or food_item)
+/// Returns the updated nutrition value
+fn refresh_meal_entry_nutrition(conn: &Connection, entry: &MealEntry) -> DbResult<Nutrition> {
+    // Get current nutrition from source
+    let base_nutrition = if let Some(recipe_id) = entry.recipe_id {
+        let recipe = Recipe::get_by_id(conn, recipe_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        recipe.cached_nutrition
+    } else if let Some(food_item_id) = entry.food_item_id {
+        let food_item = FoodItem::get_by_id(conn, food_item_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        food_item.nutrition
+    } else {
+        return Ok(Nutrition::zero());
+    };
+
+    // Scale by servings and percent eaten
+    let nutrition = base_nutrition.scale(entry.servings * (entry.percent_eaten / 100.0));
+
+    // Update the meal entry's cached nutrition
+    conn.execute(
+        r#"
+        UPDATE meal_entries SET
+            cached_calories = ?1,
+            cached_protein = ?2,
+            cached_carbs = ?3,
+            cached_fat = ?4,
+            cached_fiber = ?5,
+            cached_sodium = ?6,
+            cached_sugar = ?7,
+            cached_saturated_fat = ?8,
+            cached_cholesterol = ?9,
+            updated_at = datetime('now')
+        WHERE id = ?10
+        "#,
+        params![
+            nutrition.calories,
+            nutrition.protein,
+            nutrition.carbs,
+            nutrition.fat,
+            nutrition.fiber,
+            nutrition.sodium,
+            nutrition.sugar,
+            nutrition.saturated_fat,
+            nutrition.cholesterol,
+            entry.id,
+        ],
+    )?;
+
     Ok(nutrition)
+}
+
+/// Recalculate and update cached nutrition for a day
+///
+/// This cascades from source: for each meal entry, it fetches the current
+/// nutrition from the recipe or food_item, recalculates with servings/percent,
+/// updates the meal entry cache, then sums for day totals.
+pub fn recalculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nutrition> {
+    let entries = MealEntry::get_for_day(conn, day_id)?;
+
+    // Refresh each meal entry from its source and sum
+    let mut total = Nutrition::zero();
+    for entry in &entries {
+        let nutrition = refresh_meal_entry_nutrition(conn, entry)?;
+        total = total + nutrition;
+    }
+
+    // Update day's cached nutrition
+    Day::update_cached_nutrition(conn, day_id, &total)?;
+
+    Ok(total)
 }

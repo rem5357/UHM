@@ -349,6 +349,28 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/vitals.rs` - WeightEntry, add_weights_batch, import_weight_csv, parse_weight_date
   - `src/mcp/server.rs` - Tool registrations and parameter structs
 
+### Phase 20: Cascading Day Nutrition Recalculation
+- **Purpose**: Ensure `recalculate_day_nutrition` refreshes meal entry caches from their sources
+- **Problem Solved**: When a recipe or food item is modified after meals are logged, the meal entry cache stays stale, so day totals remain wrong even after recalculation
+- **Previous Behavior**: `recalculate_day_nutrition` only summed existing cached values from meal entries
+- **New Behavior**: `recalculate_day_nutrition` now:
+  1. For each meal entry on that day:
+     - If source is recipe: fetches current `cached_nutrition` from recipe table
+     - If source is food_item: fetches current `nutrition` from food_item table
+     - Recalculates: `source_nutrition × servings × (percent_eaten / 100)`
+     - Updates the meal entry's cached nutrition fields
+  2. Sums all updated meal entries for day totals
+  3. Returns as normal
+- **Benefits**:
+  - Recipe/food_item edits now propagate to historical meal entries automatically
+  - No need to manually delete and re-log meals after source changes
+  - Day totals always reflect current source nutrition values
+- **Implementation**:
+  - New helper function `refresh_meal_entry_nutrition()` fetches source and updates entry cache
+  - `recalculate_day_nutrition()` calls this for each entry before summing
+- **Files Modified**:
+  - `src/models/meal_entry.rs` - refresh_meal_entry_nutrition, updated recalculate_day_nutrition
+
 ## Technology Stack
 
 ### Rust
