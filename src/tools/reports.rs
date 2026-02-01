@@ -1284,3 +1284,468 @@ pub fn generate_weight_report(
                         total_readings, days_analyzed, change_str),
     })
 }
+
+// ============================================================================
+// Day Summary Report Generation
+// ============================================================================
+
+use crate::models::{
+    Day, Exercise, ExerciseSegment, FoodItem, MealEntry, MealType, Nutrition,
+    Recipe, RecipeIngredient,
+};
+use crate::nutrition::calculate_nutrition_multiplier;
+
+/// Response for day summary generation
+#[derive(Debug, Serialize)]
+pub struct DaySummaryResponse {
+    pub file_path: String,
+    pub summary: DaySummary,
+}
+
+/// Summary statistics for the day
+#[derive(Debug, Serialize)]
+pub struct DaySummary {
+    pub date: String,
+    pub weight: Option<f64>,
+    pub weight_change: Option<f64>,
+    pub gross_calories: f64,
+    pub net_calories: f64,
+    pub protein: f64,
+    pub sodium: f64,
+    pub exercise_calories: f64,
+    pub tier: String,
+    pub protein_status: String,
+}
+
+/// Ingredient nutrition breakdown for the report
+#[derive(Debug)]
+struct IngredientNutrition {
+    name: String,
+    amount: String,
+    nutrition: Nutrition,
+}
+
+/// Get calorie tier classification
+fn get_calorie_tier(gross: f64, net: f64, protein: f64) -> &'static str {
+    if net <= 1500.0 && protein >= 140.0 {
+        "MEGA Win"
+    } else if gross < 2000.0 {
+        "Super Win"
+    } else if gross < 3000.0 {
+        "Win"
+    } else {
+        "Over Budget"
+    }
+}
+
+/// Get status emoji and text for a target
+fn get_status(target_type: &str, value: f64) -> (String, String) {
+    match target_type {
+        "gross_calories" => {
+            if value < 2000.0 {
+                ("✅".to_string(), "On target".to_string())
+            } else {
+                ("❌".to_string(), "Over".to_string())
+            }
+        }
+        "net_calories" => {
+            if value <= 1500.0 {
+                ("✅".to_string(), "On target".to_string())
+            } else {
+                ("❌".to_string(), "Over".to_string())
+            }
+        }
+        "protein" => {
+            if value >= 140.0 {
+                ("✅".to_string(), "On target".to_string())
+            } else {
+                ("⚠️".to_string(), "Low".to_string())
+            }
+        }
+        "sodium" => {
+            if value < 1800.0 {
+                ("✅".to_string(), "On target".to_string())
+            } else {
+                ("⚠️".to_string(), "High".to_string())
+            }
+        }
+        _ => ("".to_string(), "".to_string()),
+    }
+}
+
+/// Format a single meal type header for display
+fn format_meal_type(meal_type: &MealType) -> &'static str {
+    match meal_type {
+        MealType::Breakfast => "Breakfast",
+        MealType::Lunch => "Lunch",
+        MealType::Dinner => "Dinner",
+        MealType::Snack => "Snack",
+        MealType::Unspecified => "Unspecified",
+    }
+}
+
+/// Generate a comprehensive markdown day summary
+pub fn generate_day_summary(
+    db: &Database,
+    date: &str,
+    output_path: &str,
+    include_ingredients: bool,
+) -> Result<DaySummaryResponse, String> {
+    let conn = db.get_conn().map_err(|e| e.to_string())?;
+
+    // Get day by date
+    let day = Day::get_by_date(&conn, date)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No data found for date {}", date))?;
+
+    // Get weight for today
+    let today_start = format!("{}T00:00:00", date);
+    let today_end = format!("{}T23:59:59", date);
+    let today_weights = Vital::list_by_date_range(&conn, &today_start, &today_end, Some(VitalType::Weight))
+        .map_err(|e| e.to_string())?;
+    let today_weight = today_weights.first().map(|v| v.value1);
+
+    // Get weight for yesterday
+    let yesterday = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?
+        .pred_opt()
+        .ok_or("Invalid date")?;
+    let yesterday_str = yesterday.format("%Y-%m-%d").to_string();
+    let yesterday_start = format!("{}T00:00:00", yesterday_str);
+    let yesterday_end = format!("{}T23:59:59", yesterday_str);
+    let yesterday_weights = Vital::list_by_date_range(&conn, &yesterday_start, &yesterday_end, Some(VitalType::Weight))
+        .map_err(|e| e.to_string())?;
+    let yesterday_weight = yesterday_weights.first().map(|v| v.value1);
+
+    let weight_change = match (today_weight, yesterday_weight) {
+        (Some(t), Some(y)) => Some(t - y),
+        _ => None,
+    };
+
+    // Get meal entries for the day
+    let meal_entries = MealEntry::get_for_day(&conn, day.id)
+        .map_err(|e| e.to_string())?;
+
+    // Get exercises for the day
+    let exercises = Exercise::list_for_day(&conn, day.id)
+        .map_err(|e| e.to_string())?;
+
+    // Calculate exercise calories
+    let exercise_calories: f64 = exercises.iter()
+        .map(|e| e.cached_calories_burned)
+        .sum();
+
+    // Calculate gross calories and nutrition from day's cached values
+    let gross_calories = day.cached_nutrition.calories;
+    let net_calories = gross_calories - exercise_calories;
+    let protein = day.cached_nutrition.protein;
+    let sodium = day.cached_nutrition.sodium;
+
+    // Determine tier
+    let tier = get_calorie_tier(gross_calories, net_calories, protein);
+    let (protein_emoji, protein_text) = get_status("protein", protein);
+    let protein_status = format!("{} {}", protein_emoji, protein_text);
+
+    // Calculate days to birthday (Oct 22, 2026)
+    let today_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+    let birthday = chrono::NaiveDate::from_ymd_opt(2026, 10, 22)
+        .ok_or("Invalid birthday date")?;
+    let days_to_birthday = (birthday - today_date).num_days();
+
+    // Format the date for display
+    let formatted_date = today_date.format("%A, %B %d, %Y").to_string();
+
+    // Build markdown content
+    let mut md = String::new();
+    md.push_str(&format!("# Food & Exercise Log — {}\n\n", formatted_date));
+
+    // Weight section
+    if let Some(w) = today_weight {
+        let change_str = match weight_change {
+            Some(c) if c > 0.0 => format!("+{:.1}", c),
+            Some(c) => format!("{:.1}", c),
+            None => "n/a".to_string(),
+        };
+        md.push_str(&format!("**Morning Weight:** {:.1} lbs ({} from yesterday)\n", w, change_str));
+    } else {
+        md.push_str("**Morning Weight:** Not recorded\n");
+    }
+
+    if days_to_birthday > 0 {
+        md.push_str(&format!("**{} days to 65 (Oct 22, 2026)**\n", days_to_birthday));
+    }
+    md.push_str("\n---\n\n");
+
+    // Group meal entries by meal type
+    let mut meals_by_type: std::collections::BTreeMap<String, Vec<&MealEntry>> = std::collections::BTreeMap::new();
+    for entry in &meal_entries {
+        let key = format_meal_type(&entry.meal_type).to_string();
+        meals_by_type.entry(key).or_default().push(entry);
+    }
+
+    // Meal sections
+    let mut meal_totals: Vec<(String, Nutrition)> = Vec::new();
+
+    for (meal_type_name, entries) in &meals_by_type {
+        for entry in entries {
+            // Get source name
+            let source_name = if let Some(recipe_id) = entry.recipe_id {
+                Recipe::get_by_id(&conn, recipe_id)
+                    .map_err(|e| e.to_string())?
+                    .map(|r| r.name)
+                    .unwrap_or_else(|| "Unknown Recipe".to_string())
+            } else if let Some(food_item_id) = entry.food_item_id {
+                FoodItem::get_by_id(&conn, food_item_id)
+                    .map_err(|e| e.to_string())?
+                    .map(|f| f.name)
+                    .unwrap_or_else(|| "Unknown Food".to_string())
+            } else {
+                "Unknown".to_string()
+            };
+
+            md.push_str(&format!("## {}: {}\n\n", meal_type_name, source_name));
+
+            // Include ingredients breakdown for recipes
+            if include_ingredients {
+                if let Some(recipe_id) = entry.recipe_id {
+                    let ingredients = RecipeIngredient::get_for_recipe(&conn, recipe_id)
+                        .map_err(|e| e.to_string())?;
+
+                    if !ingredients.is_empty() {
+                        // Build ingredient nutrition list
+                        let mut ingredient_data: Vec<IngredientNutrition> = Vec::new();
+
+                        for ing in &ingredients {
+                            if let Some(food_item) = FoodItem::get_by_id(&conn, ing.food_item_id)
+                                .map_err(|e| e.to_string())?
+                            {
+                                let multiplier = calculate_nutrition_multiplier(
+                                    ing.quantity,
+                                    &ing.unit,
+                                    food_item.serving_size,
+                                    &food_item.serving_unit,
+                                    food_item.grams_per_serving,
+                                    food_item.ml_per_serving,
+                                );
+                                let scaled_nutrition = food_item.nutrition.scale(multiplier);
+
+                                ingredient_data.push(IngredientNutrition {
+                                    name: food_item.name.clone(),
+                                    amount: format!("{:.1} {}", ing.quantity, ing.unit),
+                                    nutrition: scaled_nutrition,
+                                });
+                            }
+                        }
+
+                        // Table header
+                        md.push_str("| Ingredient | Amount | Cal | Protein | Fat | Carbs | Fiber | Sodium |\n");
+                        md.push_str("|------------|--------|----:|--------:|----:|------:|------:|-------:|\n");
+
+                        for ing_data in &ingredient_data {
+                            md.push_str(&format!(
+                                "| {} | {} | {:.0} | {:.1}g | {:.1}g | {:.1}g | {:.1}g | {:.0}mg |\n",
+                                ing_data.name,
+                                ing_data.amount,
+                                ing_data.nutrition.calories,
+                                ing_data.nutrition.protein,
+                                ing_data.nutrition.fat,
+                                ing_data.nutrition.carbs,
+                                ing_data.nutrition.fiber,
+                                ing_data.nutrition.sodium,
+                            ));
+                        }
+
+                        // Meal total row
+                        md.push_str(&format!(
+                            "| **MEAL TOTAL** | | **{:.0}** | **{:.1}g** | **{:.1}g** | **{:.1}g** | **{:.1}g** | **{:.0}mg** |\n",
+                            entry.cached_nutrition.calories,
+                            entry.cached_nutrition.protein,
+                            entry.cached_nutrition.fat,
+                            entry.cached_nutrition.carbs,
+                            entry.cached_nutrition.fiber,
+                            entry.cached_nutrition.sodium,
+                        ));
+                        md.push('\n');
+                    }
+                } else {
+                    // Food item - show single row
+                    md.push_str("| Item | Cal | Protein | Fat | Carbs | Fiber | Sodium |\n");
+                    md.push_str("|------|----:|--------:|----:|------:|------:|-------:|\n");
+                    md.push_str(&format!(
+                        "| {} | {:.0} | {:.1}g | {:.1}g | {:.1}g | {:.1}g | {:.0}mg |\n\n",
+                        source_name,
+                        entry.cached_nutrition.calories,
+                        entry.cached_nutrition.protein,
+                        entry.cached_nutrition.fat,
+                        entry.cached_nutrition.carbs,
+                        entry.cached_nutrition.fiber,
+                        entry.cached_nutrition.sodium,
+                    ));
+                }
+            }
+
+            meal_totals.push((format!("{}: {}", meal_type_name, source_name), entry.cached_nutrition.clone()));
+        }
+    }
+
+    // Exercise sections
+    if !exercises.is_empty() {
+        for exercise in &exercises {
+            md.push_str(&format!("## Exercise: {}\n\n", exercise.exercise_type.display_name()));
+
+            // Get segments
+            let segments = ExerciseSegment::list_for_exercise(&conn, exercise.id)
+                .map_err(|e| e.to_string())?;
+
+            md.push_str("| Metric | Value |\n");
+            md.push_str("|--------|-------|\n");
+            md.push_str(&format!("| Duration | {:.1} minutes |\n", exercise.cached_duration_minutes));
+            md.push_str(&format!("| Distance | {:.2} miles |\n", exercise.cached_distance_miles));
+
+            // Calculate average speed
+            if exercise.cached_duration_minutes > 0.0 {
+                let avg_speed = (exercise.cached_distance_miles / exercise.cached_duration_minutes) * 60.0;
+                md.push_str(&format!("| Avg Speed | {:.1} mph |\n", avg_speed));
+            }
+
+            md.push_str(&format!("| Calories Burned | {:.0} cal |\n", exercise.cached_calories_burned));
+
+            // Show segments if multiple
+            if segments.len() > 1 {
+                md.push_str("\n### Segments\n\n");
+                md.push_str("| # | Duration | Speed | Distance | Incline | Cal |\n");
+                md.push_str("|---|----------|-------|----------|---------|-----|\n");
+                for seg in &segments {
+                    md.push_str(&format!(
+                        "| {} | {:.1} min | {:.1} mph | {:.2} mi | {:.0}% | {:.0} |\n",
+                        seg.segment_order,
+                        seg.duration_minutes.unwrap_or(0.0),
+                        seg.speed_mph.unwrap_or(0.0),
+                        seg.distance_miles.unwrap_or(0.0),
+                        seg.incline_percent,
+                        seg.calories_burned,
+                    ));
+                }
+            }
+
+            // Post-exercise BP/HR recovery
+            if let Some(post_group_id) = exercise.post_vital_group_id {
+                let post_vitals = Vital::list_by_group(&conn, post_group_id)
+                    .map_err(|e| e.to_string())?;
+
+                if !post_vitals.is_empty() {
+                    md.push_str("\n### Post-Exercise BP/HR Recovery\n\n");
+                    md.push_str("| Time | BP | HR |\n");
+                    md.push_str("|------|----|----|\n");
+
+                    // Group by timestamp and show BP+HR together
+                    for vital in &post_vitals {
+                        match vital.vital_type {
+                            VitalType::BloodPressure => {
+                                let hr_vital = post_vitals.iter()
+                                    .find(|v| v.vital_type == VitalType::HeartRate && v.timestamp == vital.timestamp);
+                                let hr_str = hr_vital.map(|v| format!("{:.0}", v.value1)).unwrap_or_else(|| "-".to_string());
+                                md.push_str(&format!(
+                                    "| Post | {:.0}/{:.0} | {} |\n",
+                                    vital.value1,
+                                    vital.value2.unwrap_or(0.0),
+                                    hr_str,
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            md.push('\n');
+        }
+    }
+
+    // Day Summary section
+    md.push_str("## Day Summary\n\n");
+
+    // Meals breakdown table
+    md.push_str("### Meals Breakdown\n\n");
+    md.push_str("| Meal | Cal | Protein | Fat | Carbs | Fiber | Sodium |\n");
+    md.push_str("|------|----:|--------:|----:|------:|------:|-------:|\n");
+
+    for (meal_name, nutrition) in &meal_totals {
+        md.push_str(&format!(
+            "| {} | {:.0} | {:.1}g | {:.1}g | {:.1}g | {:.1}g | {:.0}mg |\n",
+            meal_name,
+            nutrition.calories,
+            nutrition.protein,
+            nutrition.fat,
+            nutrition.carbs,
+            nutrition.fiber,
+            nutrition.sodium,
+        ));
+    }
+
+    md.push_str(&format!(
+        "| **GROSS TOTAL** | **{:.0}** | **{:.1}g** | **{:.1}g** | **{:.1}g** | **{:.1}g** | **{:.0}mg** |\n\n",
+        gross_calories,
+        protein,
+        day.cached_nutrition.fat,
+        day.cached_nutrition.carbs,
+        day.cached_nutrition.fiber,
+        sodium,
+    ));
+
+    // Net calories table
+    md.push_str("### Net Calories\n\n");
+    md.push_str("| Gross Intake | Exercise Burned | Net Calories |\n");
+    md.push_str("|-------------:|----------------:|-------------:|\n");
+    md.push_str(&format!(
+        "| {:.0} | {:.0} | {:.0} |\n\n",
+        gross_calories,
+        exercise_calories,
+        net_calories,
+    ));
+
+    md.push_str("---\n\n");
+
+    // Status Check section
+    md.push_str("## Status Check\n\n");
+    md.push_str("| Target | Goal | Actual | Status |\n");
+    md.push_str("|--------|------|-------:|--------|\n");
+
+    let (gross_emoji, gross_text) = get_status("gross_calories", gross_calories);
+    md.push_str(&format!("| Calories (gross) | <2000 | {:.0} | {} {} |\n", gross_calories, gross_emoji, gross_text));
+
+    let (net_emoji, net_text) = get_status("net_calories", net_calories);
+    md.push_str(&format!("| Net Calories | ≤1500 | {:.0} | {} {} |\n", net_calories, net_emoji, net_text));
+
+    let (prot_emoji, prot_text) = get_status("protein", protein);
+    md.push_str(&format!("| Protein | ≥140g | {:.1}g | {} {} |\n", protein, prot_emoji, prot_text));
+
+    let (sod_emoji, sod_text) = get_status("sodium", sodium);
+    md.push_str(&format!("| Sodium | <1800mg | {:.0}mg | {} {} |\n\n", sodium, sod_emoji, sod_text));
+
+    md.push_str(&format!("### Current Tier: **{}**\n", tier));
+
+    // Write to file
+    let path = std::path::Path::new(output_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, &md).map_err(|e| e.to_string())?;
+
+    Ok(DaySummaryResponse {
+        file_path: output_path.to_string(),
+        summary: DaySummary {
+            date: date.to_string(),
+            weight: today_weight,
+            weight_change,
+            gross_calories,
+            net_calories,
+            protein,
+            sodium,
+            exercise_calories,
+            tier: tier.to_string(),
+            protein_status,
+        },
+    })
+}

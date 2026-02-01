@@ -371,6 +371,42 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - **Files Modified**:
   - `src/models/meal_entry.rs` - refresh_meal_entry_nutrition, updated recalculate_day_nutrition
 
+### Phase 21: Day Summary Report Generation
+- **Purpose**: Generate comprehensive markdown report summarizing a day's meals, exercise, and nutrition status
+- **New Tool**: `generate_day_summary`
+  - Input: date (YYYY-MM-DD), optional output_path, optional include_ingredients (default true)
+  - Output: Markdown file saved to Downloads folder + JSON summary stats
+- **Report Sections**:
+  1. **Header**: Formatted date, morning weight with change from yesterday, days to birthday (Oct 22, 2026)
+  2. **Meal Sections**: For each meal entry:
+     - Recipe/food name as header
+     - Ingredient-level nutrition table (if include_ingredients=true)
+     - Columns: Ingredient, Amount, Cal, Protein, Fat, Carbs, Fiber, Sodium
+     - Meal total row
+  3. **Exercise Sections**: For each exercise:
+     - Metrics: Duration, Distance, Avg Speed, Calories Burned
+     - Segment breakdown (if multiple segments)
+     - Post-exercise BP/HR recovery table (if post_vital_group linked)
+  4. **Day Summary**:
+     - Meals breakdown table with gross totals
+     - Net calories calculation (Gross - Exercise)
+  5. **Status Check**: Target vs Actual with emoji status
+     - Gross Calories: <2000
+     - Net Calories: ≤1500
+     - Protein: ≥140g
+     - Sodium: <1800mg
+  6. **Tier Classification**:
+     - MEGA Win: net ≤1500 AND protein ≥140g
+     - Super Win: gross <2000
+     - Win: gross <3000
+     - Over Budget: gross ≥3000
+- **Response Includes**:
+  - `file_path`: Path to generated markdown file
+  - `summary`: JSON object with date, weight, weight_change, gross_calories, net_calories, protein, sodium, exercise_calories, tier, protein_status
+- **Files Modified**:
+  - `src/tools/reports.rs` - generate_day_summary, DaySummaryResponse, DaySummary structs, helper functions
+  - `src/mcp/server.rs` - GenerateDaySummaryParams, tool registration
+
 ## Technology Stack
 
 ### Rust
@@ -494,7 +530,12 @@ D:\Projects\UHM\
 │   │   ├── days.rs         # Day and meal entry tool functions + stats
 │   │   ├── medications.rs  # Medication tool functions
 │   │   ├── vitals.rs       # Vital tool functions + stats
-│   │   └── exercise.rs     # Exercise tool functions + stats
+│   │   ├── exercise.rs     # Exercise tool functions + stats
+│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Day Summary)
+│   ├── nutrition/
+│   │   ├── mod.rs
+│   │   ├── units.rs        # Unit types, categories, conversion constants
+│   │   └── converter.rs    # Unit parsing and conversion functions
 │   └── mcp/
 │       ├── mod.rs
 │       └── server.rs       # MCP server, all tool definitions

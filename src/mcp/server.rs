@@ -783,6 +783,17 @@ pub struct GenerateWeightReportParams {
     pub output_path: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateDaySummaryParams {
+    /// Date in ISO format: YYYY-MM-DD
+    pub date: String,
+    /// Full path for markdown output. If not provided, saves to C:\Users\rober\Downloads with auto-generated name.
+    pub output_path: Option<String>,
+    /// Include ingredient-level nutrition breakdown for recipes (default true)
+    #[serde(default = "default_true")]
+    pub include_ingredients: bool,
+}
+
 // ============================================================================
 // Exercise Parameter Structs
 // ============================================================================
@@ -1900,6 +1911,21 @@ impl UhmService {
             &p.start_date,
             &p.end_date,
             &output_path,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Generate a detailed markdown summary of a day's meals, exercise, and nutrition. Includes ingredient-level breakdowns, exercise metrics, BP recovery data, and status against daily targets. Saves report to Downloads folder.")]
+    fn generate_day_summary(&self, Parameters(p): Parameters<GenerateDaySummaryParams>) -> Result<CallToolResult, McpError> {
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\Day_Summary_{}.md", p.date)
+        });
+        let result = reports::generate_day_summary(
+            &self.database,
+            &p.date,
+            &output_path,
+            p.include_ingredients,
         ).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
