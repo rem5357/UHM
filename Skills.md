@@ -407,6 +407,69 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/reports.rs` - generate_day_summary, DaySummaryResponse, DaySummary structs, helper functions
   - `src/mcp/server.rs` - GenerateDaySummaryParams, tool registration
 
+### Phase 22: Recipe-Free Workflow (Direct Meal Logging)
+- **Purpose**: Streamline meal logging by allowing direct food item logging without recipe intermediaries
+- **Problem Solved**: Creating a recipe for every meal added unnecessary overhead. Users now log food items directly with quantities.
+- **Database Schema** (Migration v8):
+  - Added `quantity` and `unit` columns to `meal_entries` table
+  - Allows direct food item logging with specific amounts (e.g., 150g chicken)
+- **New Tools**:
+  - `search_food_items_batch` - Search multiple food items in ONE call with full nutrition data
+    - Input: Array of query strings, fuzzy_match boolean, limit_per_query
+    - Returns complete nutrition for all matches (no follow-up get_food_item needed)
+    - Fuzzy matching via Haiku API for unmatched queries
+  - `log_meal_items_batch` - Log multiple food items to a meal in ONE call
+    - Input: date, meal_type, array of items with food_item_id, quantity, unit, optional percent_eaten/notes
+    - Calculates nutrition based on quantity/unit conversion
+    - Returns per-item results and updated day totals
+- **Recipe Tools Removed from MCP** (code preserved):
+  - `create_recipe`, `update_recipe`, `delete_recipe`
+  - `add_recipe_ingredient`, `add_recipe_ingredients_batch`
+  - `update_recipe_ingredient`, `remove_recipe_ingredient`
+  - `add_recipe_component`, `update_recipe_component`, `remove_recipe_component`
+  - `recalculate_recipe_nutrition`, `list_unused_recipes`
+  - `get_recipe`, `list_recipes` (historical access also removed)
+- **Compound Food Items**: For frequently-used combinations (DIYOO, protein coffee), create a single food item with combined nutrition and document recipe in notes field
+- **Workflow Reduction**: Typical meal logging reduced from 4+ tool calls to 2 (search_food_items_batch + log_meal_items_batch)
+- **Files Modified**:
+  - `src/db/migrations.rs` - Migration v8 for quantity/unit columns
+  - `src/models/meal_entry.rs` - create_direct(), calculate_direct_log_multiplier()
+  - `src/tools/food_items.rs` - search_food_items_batch, FoodItemFullSummary structs
+  - `src/tools/days.rs` - log_meal_items_batch, BatchMealItem structs
+  - `src/mcp/server.rs` - New tools, recipe tools commented out
+  - `src/tools/status.rs` - Updated MEAL_INSTRUCTIONS with new workflow
+
+### Phase 23: FTS5 Full-Text Search & Improved Fuzzy Matching
+- **Purpose**: Fix search failures when queries don't exactly match food item names
+- **Problem Solved**: SQL LIKE search with phrases like "burrito shell" found nothing because "shell" ≠ "tortilla". Brand + name combinations (e.g., "king oscar salmon") also failed.
+- **Database Schema** (Migration v9):
+  - Created `food_items_fts` FTS5 virtual table indexing `name` and `brand`
+  - Triggers keep FTS in sync on INSERT/UPDATE/DELETE
+- **FTS5 Search Features**:
+  - Word tokenization: "burrito shell" → `"burrito* OR shell*"`
+  - Prefix matching: "salm" matches "Salmon"
+  - Word-order independence: "golden monk fruit" finds "Monk Fruit Sweetener Golden"
+  - Brand + name combined: "king oscar salmon" finds "Atlantic Salmon in Olive Oil" (brand: King Oscar)
+  - Relevance ranking via FTS5 rank score
+- **Search Hierarchy**:
+  1. **FTS5 search** (fast, handles tokenization) - 80%+ of queries
+  2. **LIKE fallback** (catches edge cases)
+  3. **Haiku fuzzy suggestion** (semantic matching for synonyms like "shell" → "tortilla")
+- **Improved Fuzzy Suggestion** (`get_fuzzy_suggestion`):
+  - Now includes brand in food names sent to Haiku: "King Oscar - Atlantic Salmon..."
+  - Improved prompt for better synonym/partial matching
+  - Case-insensitive response validation
+  - Contains-match fallback for partial responses
+  - 10-second timeout for reliability
+- **Benefits**:
+  - FTS5 handles word tokenization without API calls
+  - Haiku only called as final fallback (reduces cost/latency)
+  - Brand searches now work naturally
+- **Files Modified**:
+  - `src/db/migrations.rs` - Migration v9 for FTS5
+  - `src/models/food_item.rs` - FoodItem::search_fts()
+  - `src/tools/food_items.rs` - Updated search_food_items_batch, fixed get_fuzzy_suggestion
+
 ## Technology Stack
 
 ### Rust
@@ -493,6 +556,34 @@ Build number starts at 0 and increments to 1 on first build. Each source change 
 - **Reasoning**: Users make mistakes - wrong timestamps, incorrect values, missing links
 - **Implementation**: Include all relevant fields in Update structs, even if rarely changed
 - **Example**: Adding `timestamp` to ExerciseUpdate and VitalUpdate allows correcting entry times
+
+### SQLite FTS5 Full-Text Search
+- **When to Use**: When users search with multiple words that may not appear consecutively
+- **Key Feature**: Word tokenization and prefix matching (e.g., "burrito shell" → "burrito* OR shell*")
+- **Setup**: Create virtual table with `USING fts5(column1, column2, content='source_table', content_rowid='id')`
+- **Sync Triggers**: AFTER INSERT/UPDATE/DELETE triggers keep FTS index in sync with source table
+- **Query Syntax**: Use MATCH with OR for multi-word queries, add * for prefix matching
+- **Ranking**: ORDER BY rank gives relevance-sorted results
+- **Limitation**: FTS5 doesn't handle synonyms - use AI fallback for semantic matching
+
+### Search Strategy Hierarchy
+- **Principle**: Layer search methods from fast/cheap to slow/expensive
+- **Pattern**: FTS5 (instant, no API) → LIKE fallback → AI fuzzy matching (API call)
+- **Why**: Most queries succeed with FTS5, reducing unnecessary API calls
+- **Implementation**: Try each method in order, only proceed to next if no results
+
+### Fuzzy Matching with AI
+- **Include Context**: Send brand + name to AI, not just name (e.g., "King Oscar - Atlantic Salmon")
+- **Validation**: Use case-insensitive matching when comparing AI response to actual items
+- **Fallbacks**: Try exact match → name-only match → contains match
+- **Timeouts**: Set reasonable timeout (10s) to avoid hanging on API issues
+- **Graceful Degradation**: Return None if AI unavailable rather than failing the entire search
+
+### Recipe-Free Architecture
+- **Principle**: Prefer direct data entry over intermediate abstractions when the abstraction adds overhead without value
+- **Example**: Recipes added unnecessary steps for simple meals - now users log food items directly with quantities
+- **Compound Items**: For reusable combinations, create a single food item with combined nutrition + recipe in notes
+- **Tool Consolidation**: Batch operations (search_food_items_batch, log_meal_items_batch) reduce round-trips
 
 ## Project Structure
 

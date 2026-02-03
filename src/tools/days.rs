@@ -3,13 +3,13 @@
 //! Tools for managing days and logging meals.
 
 use std::collections::HashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::models::{
     Day, DayUpdate, MealEntry, MealEntryCreate, MealEntryDetail, MealEntryUpdate,
     MealType, Nutrition, recalculate_day_nutrition,
-    Exercise, ExerciseSegment,
+    Exercise, ExerciseSegment, FoodItem,
 };
 
 /// Response for get_or_create_day
@@ -562,6 +562,192 @@ pub fn delete_day(db: &Database, date: &str) -> Result<DeleteDayResponse, String
         deleted: true,
         date: date.to_string(),
         message: format!("Day {} deleted successfully", date),
+    })
+}
+
+// ============================================================================
+// Batch Meal Logging
+// ============================================================================
+
+/// Input for a single meal item in batch logging
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchMealItem {
+    /// Food item ID
+    pub food_item_id: i64,
+    /// Quantity in g/ml/count
+    pub quantity: f64,
+    /// Unit: g, ml, or count
+    pub unit: String,
+    /// Percentage eaten (0-100, default 100)
+    #[serde(default = "default_percent")]
+    pub percent_eaten: f64,
+    /// Optional notes
+    pub notes: Option<String>,
+}
+
+fn default_percent() -> f64 { 100.0 }
+
+/// Result for a single item in batch logging
+#[derive(Debug, Serialize)]
+pub struct BatchMealItemResult {
+    pub food_item_id: i64,
+    pub food_item_name: String,
+    pub meal_entry_id: i64,
+    pub quantity: f64,
+    pub unit: String,
+    pub nutrition: Nutrition,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Response for log_meal_items_batch
+#[derive(Debug, Serialize)]
+pub struct LogMealItemsBatchResponse {
+    pub date: String,
+    pub day_id: i64,
+    pub meal_type: String,
+    pub items: Vec<BatchMealItemResult>,
+    pub items_logged: usize,
+    pub items_failed: usize,
+    pub meal_total: Nutrition,
+    pub day_total: Nutrition,
+}
+
+/// Log multiple food items to a meal in one call
+///
+/// This is the primary tool for the recipe-free workflow:
+/// 1. Takes a date, meal type, and list of items with quantities
+/// 2. Creates meal_entries with quantity/unit fields populated
+/// 3. Calculates nutrition using unit conversion logic
+/// 4. Returns per-item results and day totals
+pub fn log_meal_items_batch(
+    db: &Database,
+    date: &str,
+    meal_type: &str,
+    items: Vec<BatchMealItem>,
+) -> Result<LogMealItemsBatchResponse, String> {
+    use crate::models::{Day, MealEntry, MealType, FoodItem};
+
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    // Get or create the day
+    let day = Day::get_or_create(&conn, date)
+        .map_err(|e| format!("Failed to get/create day: {}", e))?;
+
+    let meal_type_enum = MealType::from_str(meal_type);
+
+    let mut results = Vec::new();
+    let mut meal_total = Nutrition::zero();
+    let mut items_logged = 0;
+    let mut items_failed = 0;
+
+    for item in items {
+        // Validate percent_eaten
+        let percent_eaten = if item.percent_eaten < 0.0 || item.percent_eaten > 100.0 {
+            results.push(BatchMealItemResult {
+                food_item_id: item.food_item_id,
+                food_item_name: "Unknown".to_string(),
+                meal_entry_id: 0,
+                quantity: item.quantity,
+                unit: item.unit.clone(),
+                nutrition: Nutrition::zero(),
+                success: false,
+                error: Some("percent_eaten must be between 0 and 100".to_string()),
+            });
+            items_failed += 1;
+            continue;
+        } else {
+            item.percent_eaten
+        };
+
+        // Get the food item to get its name
+        let food_item = match FoodItem::get_by_id(&conn, item.food_item_id) {
+            Ok(Some(fi)) => fi,
+            Ok(None) => {
+                results.push(BatchMealItemResult {
+                    food_item_id: item.food_item_id,
+                    food_item_name: "Unknown".to_string(),
+                    meal_entry_id: 0,
+                    quantity: item.quantity,
+                    unit: item.unit.clone(),
+                    nutrition: Nutrition::zero(),
+                    success: false,
+                    error: Some(format!("Food item not found: {}", item.food_item_id)),
+                });
+                items_failed += 1;
+                continue;
+            }
+            Err(e) => {
+                results.push(BatchMealItemResult {
+                    food_item_id: item.food_item_id,
+                    food_item_name: "Unknown".to_string(),
+                    meal_entry_id: 0,
+                    quantity: item.quantity,
+                    unit: item.unit.clone(),
+                    nutrition: Nutrition::zero(),
+                    success: false,
+                    error: Some(format!("Database error: {}", e)),
+                });
+                items_failed += 1;
+                continue;
+            }
+        };
+
+        // Create the meal entry using direct quantity/unit
+        match MealEntry::create_direct(
+            &conn,
+            day.id,
+            meal_type_enum.clone(),
+            item.food_item_id,
+            item.quantity,
+            &item.unit,
+            Some(percent_eaten),
+            item.notes,
+        ) {
+            Ok(entry) => {
+                meal_total = meal_total + entry.cached_nutrition.clone();
+                results.push(BatchMealItemResult {
+                    food_item_id: item.food_item_id,
+                    food_item_name: food_item.name,
+                    meal_entry_id: entry.id,
+                    quantity: item.quantity,
+                    unit: item.unit,
+                    nutrition: entry.cached_nutrition,
+                    success: true,
+                    error: None,
+                });
+                items_logged += 1;
+            }
+            Err(e) => {
+                results.push(BatchMealItemResult {
+                    food_item_id: item.food_item_id,
+                    food_item_name: food_item.name,
+                    meal_entry_id: 0,
+                    quantity: item.quantity,
+                    unit: item.unit,
+                    nutrition: Nutrition::zero(),
+                    success: false,
+                    error: Some(format!("Failed to create entry: {}", e)),
+                });
+                items_failed += 1;
+            }
+        }
+    }
+
+    // Get updated day totals
+    let updated_day = Day::get_by_id(&conn, day.id)
+        .map_err(|e| format!("Failed to get updated day: {}", e))?
+        .ok_or_else(|| "Day not found after logging".to_string())?;
+
+    Ok(LogMealItemsBatchResponse {
+        date: date.to_string(),
+        day_id: day.id,
+        meal_type: meal_type_enum.as_str().to_string(),
+        items: results,
+        items_logged,
+        items_failed,
+        meal_total,
+        day_total: updated_day.cached_nutrition,
     })
 }
 

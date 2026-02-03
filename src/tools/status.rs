@@ -11,16 +11,17 @@ use crate::build_info::BuildInfo;
 
 /// Meal logging instructions for AI assistants
 pub const MEAL_INSTRUCTIONS: &str = r#"
-# UHM Meal Logging Instructions
+# UHM Meal Logging Instructions (Recipe-Free Workflow)
 
-This guide explains how to log meals using the Universal Health Manager (UHM) tools.
+This guide explains the streamlined meal logging workflow using direct food item logging.
 
 ## Overview
 
-To log a meal, you need:
-1. **Food Items** - Base ingredients with nutritional data (stored per 100g/100ml/count)
-2. **Recipes** (optional) - Collections of food items with quantities in grams/ml
-3. **Meal Entry** - The actual logged consumption attached to a day
+The recipe-free workflow is optimized for efficiency:
+1. **Search** for food items using `search_food_items_batch` (one call for all foods)
+2. **Log** all items using `log_meal_items_batch` (one call per meal)
+
+This reduces tool calls by ~50% compared to the recipe-based workflow.
 
 ---
 
@@ -32,272 +33,96 @@ To log a meal, you need:
 - Returns the current date and time in ISO format
 - Use the `date` field (YYYY-MM-DD) for meal logging
 
-**Example workflow:**
-1. User says "log my breakfast"
-2. Call `ucm_now` to get current date → returns `{"date": "2026-01-13", "time": "08:30:00", ...}`
-3. Use `"2026-01-13"` as the date parameter in `log_meal`
+---
 
-**Why use UCM?** LLMs have limitations with temporal reasoning. UCM provides accurate, real-time date calculations. Always use `ucm_now` rather than guessing or assuming the current date.
+## Quick Start: Logging a Meal
+
+### Step 1: Search for All Foods at Once
+
+```
+search_food_items_batch(
+  queries: ["chicken breast", "rice", "broccoli"],
+  fuzzy_match: true,  // Get AI suggestions for unmatched items
+  limit_per_query: 5
+)
+```
+
+Returns FULL nutrition data for all matches - no need for follow-up `get_food_item` calls.
+
+### Step 2: Log All Items in One Call
+
+```
+log_meal_items_batch(
+  date: "2026-01-13",
+  meal_type: "dinner",
+  items: [
+    { food_item_id: 15, quantity: 150, unit: "g" },      // 150g chicken
+    { food_item_id: 23, quantity: 200, unit: "g" },      // 200g rice
+    { food_item_id: 45, quantity: 100, unit: "g" },      // 100g broccoli
+    { food_item_id: 12, quantity: 2, unit: "count" }     // 2 eggs
+  ]
+)
+```
+
+Returns per-item nutrition and day totals.
+
+---
+
+## Unit Standards
+
+### Food Items (stored in database)
+| Category | serving_size | serving_unit |
+|----------|--------------|--------------|
+| Solids | 100 | g |
+| Liquids | 100 | ml |
+| Countables | 1 | count |
+
+### Logging Units (what you pass to log_meal_items_batch)
+| Unit | Use For | Example |
+|------|---------|---------|
+| `g` | Solids (meat, grains, vegetables) | 150g chicken |
+| `ml` | Liquids (milk, oil, juice) | 240ml oat milk |
+| `count` | Countable items (eggs, bananas) | 2 eggs |
+
+### Unit Conversion Examples
+
+| Food Item | Stored As | Logging 150g = |
+|-----------|-----------|----------------|
+| Chicken (100g = 165 cal) | per 100g | 165 × 1.5 = 248 cal |
+| Rice (100g = 130 cal) | per 100g | 130 × 1.5 = 195 cal |
+| Egg (1 count = 72 cal) | per 1 count | 72 × 2 = 144 cal (for 2 eggs) |
 
 ---
 
 ## The 80% Rule for Nutrition Ranges
 
-When a nutrition source provides a **range** instead of a single value, use this formula:
-
+When a source provides a range:
 **Final Value = Low Value + (80% × Difference)**
 
-### Example
-- Source says: "500-600 calories"
-- Calculation: 500 + (0.80 × 100) = **580 calories**
-
-### Why 80%?
-- Manufacturers often underestimate actual values
-- The high end may represent worst-case scenarios
-- 80% provides a realistic estimate without over-counting
-
-### Apply to ALL nutrition fields with ranges:
-- Calories, protein, fat, carbs, fiber, sugar, sodium, etc.
+Example: "500-600 calories" → 500 + (0.80 × 100) = **580 cal**
 
 ---
 
-## MANDATORY Unit Standards for Food Items
+## Partial Consumption
 
-ALL food items MUST use one of these three standardized formats:
+Use `percent_eaten` for when you don't finish everything:
 
-| Category | serving_size | serving_unit | Nutrition stored as |
-|----------|--------------|--------------|---------------------|
-| **Solids** | 100 | g | per 100 grams |
-| **Liquids** | 100 | ml | per 100 milliliters |
-| **Countables** | 1 | count | per 1 item |
-
-**NO EXCEPTIONS.** This ensures consistent, accurate calculations.
-
-### Unit Selection Decision Tree
-
-1. **Is it countable?** (sushi pieces, eggs, cookies, whole fruits, pills)
-   → `serving_size: 1, serving_unit: "count"`
-   → Nutrition = per 1 item
-   → ALWAYS use "count", never "piece", "each", "item", or "unit"
-
-2. **Is it a solid/semi-solid?** (meat, cheese, vegetables, rice, powders, spreads)
-   → `serving_size: 100, serving_unit: "g"`
-   → Nutrition = per 100 grams
-
-3. **Is it a liquid?** (milk, juice, oil, broth, sauces)
-   → `serving_size: 100, serving_unit: "ml"`
-   → Nutrition = per 100 milliliters
-
-### Converting Package Nutrition to Standard Format
-
-Most packages show nutrition "per serving" (e.g., "per 2 tbsp (32g)"). Convert to per-100g:
-
-**Formula:** `(nutrition_value / package_grams) * 100`
-
-**Example - Peanut Butter:**
-- Package says: 190 cal per 2 tbsp (32g)
-- Convert: (190 / 32) * 100 = 594 calories per 100g
-- Store as: `serving_size: 100, serving_unit: "g", calories: 594`
-
-**Example - Oat Milk:**
-- Package says: 110 cal per 1 cup (240ml)
-- Convert: (110 / 240) * 100 = 46 calories per 100ml
-- Store as: `serving_size: 100, serving_unit: "ml", calories: 46`
-
-### NEVER Use These Units in Food Items
-
-- "handful", "portion", "serving"
-- "piece", "each", "item" (use "count" instead)
-- "tbsp", "cup", "scoop" (convert to grams, store per 100g)
-- "small/medium/large" (put descriptor in name, use "count")
-
-### Examples by Food Type
-
-| Food Type | serving_size | serving_unit | Name Convention |
-|-----------|--------------|--------------|-----------------|
-| Chicken breast | 100 | g | "Chicken Breast (grilled)" |
-| Rice (cooked) | 100 | g | "Jasmine Rice (cooked)" |
-| Protein powder | 100 | g | "ON Whey - Vanilla" |
-| Olive oil | 100 | ml | "Extra Virgin Olive Oil" |
-| Oat milk | 100 | ml | "Oat Milk Barista" |
-| Eggs | 1 | count | "Egg (large)" |
-| Banana | 1 | count | "Banana (medium)" |
-| Sushi | 1 | count | "Salmon Nigiri" |
-
----
-
-## Nutrition Data Sources
-
-### Primary Source: USDA FoodData Central
-
-**URL:** https://fdc.nal.usda.gov/
-
-**How to use:**
-1. Search for the food item (e.g., "chicken breast raw", "rolled oats", "banana")
-2. Look for **"Foundation Foods"** or **"SR Legacy"** data types - these are the most accurate analytical values
-3. Avoid "Branded Foods" unless specifically looking up a branded product
-4. Note the serving size and unit provided, then normalize to canonical units (per 100g for solids, per 100ml for liquids)
-
-**Data types in order of reliability:**
-1. **Foundation Foods** - Analytically derived, most accurate
-2. **SR Legacy** (Standard Reference) - USDA's historical reference database
-3. **FNDDS** - Food and Nutrient Database for Dietary Studies
-4. **Branded Foods** - Manufacturer-submitted data (use only for specific branded products)
-
-**Citation:** U.S. Department of Agriculture, Agricultural Research Service. FoodData Central, 2019. fdc.nal.usda.gov
-
-### Secondary Source: Harvard T.H. Chan School of Public Health
-
-**URL:** https://nutritionsource.hsph.harvard.edu/
-
-**How to use:**
-- Use for qualitative guidance about food categories (whole grains vs refined, healthy fats, etc.)
-- Use for context on why certain foods are healthy/unhealthy
-- **NOT a per-food nutritional database** - does not have specific calorie/macro values
-- Good for understanding food categories when classifying items
-
-**Useful pages:**
-- Food Features: https://nutritionsource.hsph.harvard.edu/food-features/
-- Healthy Eating Plate: https://nutritionsource.hsph.harvard.edu/healthy-eating-plate/
-
-### For Branded Products
-
-**Always prefer the actual product label over database lookups.** Label values are:
-- Required by FDA to be accurate within regulatory tolerances
-- Specific to the exact product formulation
-- Include the manufacturer's stated serving size (helpful for conversions like "1 scoop = 31g")
-
-### Workflow for Adding Food Items
-
-| Scenario | Data Source | Action |
-|----------|-------------|--------|
-| **Branded product with label** | Product label | Use label values directly, convert to per-100g/100ml |
-| **Generic food** (e.g., "chicken breast") | USDA FoodData Central | Use Foundation Foods or SR Legacy values |
-| **Unknown conversion** (e.g., "grams per cup of flour") | USDA FDC | Check "Portion" data for gram weights of common measures |
-
-**Example - Looking up "rolled oats":**
-1. Go to fdc.nal.usda.gov
-2. Search "rolled oats"
-3. Select the **Foundation Foods** or **SR Legacy** entry
-4. Find nutrition per 100g
-5. Store in UHM with `serving_size: 100, serving_unit: "g"`
-
----
-
-## CRITICAL: Recipe Ingredient Units
-
-**This is where most errors occur.** The UHM system does NOT automatically convert volume measurements (cups, tbsp, scoops) to grams. **Claude must perform this conversion manually when adding recipe ingredients.**
-
-### The Golden Rule
-
-**Recipe ingredients must use grams (g) or milliliters (ml) to match the food item's base unit.**
-
-When a user says "add 4 cups of oats", Claude must:
-1. Know that 1 cup rolled oats ≈ 80g
-2. Calculate: 4 cups × 80g = 320g
-3. Store the ingredient as: `quantity: 320, unit: "g"`
-
-### Common Conversion Reference
-
-Claude should know (or look up) these conversions:
-
-#### Dry Goods
-| Item | 1 cup = | 1 tbsp = | 1 tsp = |
-|------|---------|----------|---------|
-| Rolled oats | 80g | 5g | 1.7g |
-| Flour | 120g | 7.5g | 2.5g |
-| Sugar | 200g | 12.5g | 4.2g |
-| Protein powder (whey) | 93g (≈3 scoops) | 6g | 2g |
-| Chia seeds | 160g | 10g | 3.3g |
-| Ground flaxseed | 130g | 8g | 2.7g |
-| PBfit/peanut powder | 64g | 8g | 2.7g |
-| Cocoa powder | 85g | 5.3g | 1.8g |
-| Freeze-dried fruit | 15-20g | 3g | 1g |
-| Monk fruit sweetener | 192g | 12g | 4g |
-
-#### Liquids
-| Item | 1 cup = | 1 tbsp = | 1 tsp = |
-|------|---------|----------|---------|
-| Water/milk/juice | 240ml | 15ml | 5ml |
-| Oil | 240ml | 15ml | 5ml |
-| Honey/syrup | 340g | 21g | 7g |
-
-#### Protein Powder Scoops
-| Brand | 1 scoop = |
-|-------|-----------|
-| ON Gold Standard | 31g |
-| Naked Whey ISO | 16g (their "2 scoops" serving = 32g) |
-| Generic whey | ~30g |
-
-### Recipe Ingredient Workflow
-
-**WRONG approach:**
 ```
-add_recipe_ingredient(
-  recipe_id: 1,
-  food_item_id: 32,  // Rolled Oats (per 100g)
-  quantity: 4,
-  unit: "cup"        // ❌ System won't convert this properly!
+log_meal_items_batch(
+  date: "2026-01-13",
+  meal_type: "dinner",
+  items: [
+    { food_item_id: 15, quantity: 150, unit: "g", percent_eaten: 75 }  // ate 75%
+  ]
 )
 ```
 
-**CORRECT approach:**
-```
-add_recipe_ingredient(
-  recipe_id: 1,
-  food_item_id: 32,  // Rolled Oats (per 100g)
-  quantity: 320,     // 4 cups × 80g/cup = 320g
-  unit: "g",         // ✅ Matches food item's base unit
-  notes: "4 cups × 80g/cup"  // Document the conversion
-)
-```
-
-### How the System Calculates Nutrition
-
-When the ingredient uses matching units (g for solids, ml for liquids):
-
-```
-nutrition_multiplier = ingredient_quantity / food_item_serving_size
-                     = 320g / 100g
-                     = 3.2
-
-ingredient_calories = food_item_calories × nutrition_multiplier
-                    = 375 cal × 3.2
-                    = 1,200 cal
-```
-
-### Best Practice: Document Conversions in Notes
-
-Always include the original measurement in the notes field:
-
-```
-add_recipe_ingredient(
-  recipe_id: 6,
-  food_item_id: 29,
-  quantity: 248,
-  unit: "g",
-  notes: "8 scoops × 31g/scoop"  // ✅ Future reference
-)
-```
-
-This helps when:
-- Reviewing recipes later
-- Debugging calculation errors
-- Adjusting recipes (e.g., "I want to use 6 scoops instead")
-
 ---
 
-## Step-by-Step Workflow
+## Adding New Food Items
 
-### Step 1: Check for Existing Food Items
+If a food doesn't exist, add it first:
 
-```
-search_food_items(query: "chicken breast")
-```
-
-### Step 2: Add Food Items (if needed)
-
-**For solids (per 100g):**
 ```
 add_food_item(
   name: "Chicken Breast (grilled)",
@@ -307,405 +132,121 @@ add_food_item(
   protein: 31,
   carbs: 0,
   fat: 3.6,
-  fiber: 0,
-  sodium: 74,
   ...
 )
 ```
 
-**For liquids (per 100ml):**
+**Converting Package Labels:**
+- Package: 190 cal per 2 tbsp (32g)
+- Per 100g: (190 / 32) × 100 = 594 cal
+
+---
+
+## Creating Compound Food Items (Reusable Combinations)
+
+For items logged repeatedly (weekly or more), create a **compound food item** instead of logging individual components each time.
+
+### When to Create
+- DIYOO variations, protein coffees, smoothie bases
+- Any combination with consistent ingredients you'll log multiple times
+
+### Workflow
+
+**Step 1: Calculate total nutrition from components**
+
+Either search existing food items or look up nutrition data:
 ```
-add_food_item(
-  name: "Oat Milk Barista",
-  serving_size: 100,
-  serving_unit: "ml",
-  calories: 46,
-  protein: 0.8,
-  ...
-)
+Morning Protein Coffee components:
+- 240ml brewed coffee: 2 cal, 0g protein
+- 31g ON Whey Vanilla: 120 cal, 24g protein, 50mg sodium
+- 60ml oat milk: 28 cal, 0.5g protein, 25mg sodium
+─────────────────────────────────────────────────
+Total: 150 cal, 24.5g protein, 75mg sodium
 ```
 
-**For countables (per 1 item):**
+**Step 2: Create compound food item**
+
 ```
 add_food_item(
-  name: "Egg (large)",
+  name: "Morning Protein Coffee (ON Vanilla)",
   serving_size: 1,
   serving_unit: "count",
-  calories: 72,
-  protein: 6.3,
+  calories: 150,
+  protein: 24.5,
+  carbs: 5,
+  fat: 2.2,
+  sodium: 75,
   ...
+  notes: "RECIPE: 240ml coffee (2 cal) + 31g ON Whey (120 cal, 24g P) + 60ml oat milk (28 cal)"
 )
 ```
 
-### Step 3: Create a Recipe
+**Step 3: Log as single item**
 
 ```
-create_recipe(
-  name: "Overnight Oats Base Mix",
-  servings_produced: 10,
-  is_favorite: true,
-  notes: "Makes ~6 cups dry mix. ½ cup = 1 serving."
-)
-```
-
-### Step 4: Add Ingredients (WITH GRAM CONVERSIONS)
-
-**IMPORTANT: Use `add_recipe_ingredients_batch` for efficiency!**
-
-This batch tool adds ALL ingredients in ONE call, which is much faster than calling `add_recipe_ingredient` multiple times (reduces from N tool calls to 1, and only recalculates nutrition once).
-
-For each ingredient, **convert to grams/ml first**, then add all at once:
-
-```
-add_recipe_ingredients_batch(
-  recipe_id: 6,
-  ingredients: [
-    {
-      food_item_id: 32,      // Rolled oats
-      quantity: 320,         // 4 cups × 80g/cup = 320g
-      unit: "g",
-      notes: "4 cups × 80g/cup"
-    },
-    {
-      food_item_id: 29,      // ON Whey Protein
-      quantity: 248,         // 8 scoops × 31g/scoop = 248g
-      unit: "g",
-      notes: "8 scoops × 31g/scoop"
-    },
-    {
-      food_item_id: 35,      // Oat milk
-      quantity: 240,         // 1 cup = 240ml
-      unit: "ml",
-      notes: "1 cup = 240ml"
-    },
-    {
-      food_item_id: 53,      // Banana (count item)
-      quantity: 0.5,
-      unit: "count",
-      notes: "½ banana added in morning"
-    }
-  ]
-)
-```
-
-The response shows success/failure for each ingredient and the final recipe nutrition.
-
-**Alternative: Single ingredient add** (use only when adding ONE ingredient):
-```
-add_recipe_ingredient(
-  recipe_id: 6,
-  food_item_id: 32,
-  quantity: 320,
-  unit: "g",
-  notes: "4 cups × 80g/cup"
-)
-```
-
-### Step 5: Add Component Recipes (optional)
-
-Recipes can include other recipes as sub-components:
-
-```
-add_recipe_component(
-  recipe_id: 8,           // DIYOO - Blueberry Donut
-  component_recipe_id: 6, // DIYOO Base Mix
-  servings: 1,            // 1 serving of base mix
-  notes: null
-)
-```
-
-The system correctly pulls the per-serving nutrition from the component recipe.
-
-### Step 6: Verify Recipe Nutrition
-
-```
-get_recipe(id: 8)
-```
-
-Check that the `nutrition_per_serving` values are reasonable. If they seem way off (e.g., 1500 calories for overnight oats), the ingredients likely have unit conversion errors.
-
-### Step 7: Log the Meal
-
-```
-log_meal(
-  date: "2026-01-13",
+log_meal_items_batch(
+  date: "2026-02-03",
   meal_type: "breakfast",
-  recipe_id: 8,
-  servings: 1,
-  percent_eaten: 100
+  items: [{ food_item_id: 201, quantity: 1, unit: "count" }]
 )
 ```
 
----
+### Notes Field Format
 
-## Fixing Existing Recipe Ingredients
-
-If you find a recipe with wrong units (e.g., "4 cups" instead of "320g"):
-
+Include enough detail to recreate or modify later:
 ```
-update_recipe_ingredient(
-  id: 34,           // ingredient ID
-  quantity: 320,    // corrected gram amount
-  unit: "g",        // correct unit
-  notes: "4 cups × 80g/cup"
-)
+RECIPE: [qty] [ingredient] ([key nutrition]) + [qty] [ingredient] + ...
+Total: [cal] cal, [protein]g protein.
+[Optional prep notes]
 ```
 
-Then recalculate the recipe:
-
-```
-recalculate_recipe_nutrition(recipe_id: 6)
-```
+### Existing Compound Food Items
+| ID | Name | Cal | Protein |
+|----|------|-----|---------|
+| 199 | DIYOO Base Mix (ON Vanilla) | 290 | 25.6g |
+| 200 | DIYOO Base Mix (Naked Whey) | 290 | 30.6g |
 
 ---
 
-## Quick Conversion Checklist
+## Common Conversions Reference
 
-When adding a recipe ingredient, ask yourself:
-
-1. **What's the food item's base unit?**
-   - Check `serving_unit` (should be "g", "ml", or "count")
-
-2. **What unit is the user giving me?**
-   - If cups, tbsp, scoops → convert to grams
-   - If fl oz, cups (liquid) → convert to ml
-   - If "half", "2 pieces" → use decimal with count
-
-3. **Do I know the conversion factor?**
-   - Check the reference table above
-   - If unknown, search for "[ingredient] grams per cup" or check package
-
-4. **Store in matching units with notes:**
-   ```
-   quantity: [converted_amount],
-   unit: "[g/ml/count]",
-   notes: "[original_amount] × [conversion_factor]"
-   ```
+| Item | 1 cup = | 1 tbsp = |
+|------|---------|----------|
+| Rolled oats | 80g | 5g |
+| Flour | 120g | 7.5g |
+| Rice (cooked) | 185g | 12g |
+| Milk/water | 240ml | 15ml |
+| Protein powder | 93g (~3 scoops) | 6g |
 
 ---
-
-## Common Mistakes to Avoid
-
-### ❌ Mistake 1: Using volume units for solid food items
-```
-quantity: 4, unit: "cup"  // Won't calculate correctly!
-```
-**Fix:** Convert to grams first
-
-### ❌ Mistake 2: Using "serving" as a unit for food items
-```
-quantity: 1, unit: "serving"  // Ambiguous!
-```
-**Fix:** For count items, use `unit: "count"`. For weight items, use `unit: "g"` with the gram amount.
-
-### ❌ Mistake 3: Forgetting that food items are per 100g/100ml
-If you add `quantity: 1, unit: "g"` for something stored per 100g, you're only getting 1% of the nutrition!
-
-**Example:** Oat milk is 46 cal per 100ml
-- `quantity: 1, unit: "ml"` → 0.46 cal (wrong!)
-- `quantity: 240, unit: "ml"` → 110 cal (correct for 1 cup)
-
-### ❌ Mistake 4: Not documenting conversions
-Six months later, you won't remember if "248g" was 8 scoops or something else.
-
-**Fix:** Always use the notes field: `notes: "8 scoops × 31g/scoop"`
-
----
-
-## Summary
-
-1. **Food items** → Always per 100g, 100ml, or 1 count
-2. **Recipe ingredients** → Always in grams or ml (Claude converts from cups/tbsp/scoops)
-3. **Document conversions** → Use notes field for future reference
-4. **Verify results** → Check that `nutrition_per_serving` is reasonable after adding ingredients
 
 ## Quick Reference
 
 | Task | Tool |
 |------|------|
-| Find food items | `search_food_items` |
+| Search multiple foods | `search_food_items_batch` |
+| Log meal items | `log_meal_items_batch` |
 | Add new food item | `add_food_item` |
 | View food item details | `get_food_item` |
-| Create recipe | `create_recipe` |
-| Delete unused recipe | `delete_recipe` |
-| Add ingredient to recipe | `add_recipe_ingredient` |
-| Add sub-recipe to recipe | `add_recipe_component` |
-| View recipe with nutrition | `get_recipe` |
-| Log meal to day | `log_meal` |
 | View day's meals | `get_day` |
-| List recent days | `list_days` |
 | Get nutrition statistics | `list_days_stats` |
 | Update meal entry | `update_meal_entry` |
 | Delete meal entry | `delete_meal_entry` |
 
-## Common Scenarios
+## Typical Workflow
 
-### Logging a simple snack
-1. `search_food_items("apple")` - Check if exists
-2. `add_food_item(...)` - Add if needed
-3. `log_meal(date, "snack", food_item_id, servings)` - Log it
-
-### Logging a homemade recipe
-1. Search/add all ingredients as food items
-2. `create_recipe(...)` - Create the recipe
-3. `add_recipe_ingredient(...)` - Add each ingredient
-4. `get_recipe(id)` - Verify nutrition looks correct
-5. `log_meal(date, meal_type, recipe_id, servings)` - Log it
-
-### Using recipe components (sub-recipes)
-Example: Creating a "Burrito Bowl" that uses a "Rice" sub-recipe:
-1. Create the rice recipe first with its ingredients
-2. Create the burrito bowl recipe
-3. `add_recipe_component(recipe_id: burrito_bowl_id, component_recipe_id: rice_id, servings: 1)`
-4. Add other ingredients directly to the burrito bowl
-5. `get_recipe(burrito_bowl_id)` - Will show both ingredients and components with combined nutrition
-
-### Partial consumption
-Use `percent_eaten` when you didn't finish:
-```
-log_meal(date, "dinner", recipe_id: 5, servings: 1, percent_eaten: 75)
-```
-
-### Updating a logged meal
-```
-update_meal_entry(id: 12, servings: 2)  // ate more than initially logged
-```
-
-### Analyzing nutrition trends
-Use `list_days_stats` to get comprehensive statistics across all logged days:
-```
-list_days_stats(start_date: "2026-01-01", end_date: "2026-01-31")
-```
-
-Returns for each nutrient (calories, protein, carbs, fat, fiber, sugar, sodium, saturated_fat, cholesterol):
-- **count** - Number of days with data
-- **sum** - Total across all days
-- **average** - Mean daily intake
-- **median** - Middle value (less affected by outliers)
-- **mode** - Most common value
-- **standard_deviation** - Variability measure
-- **min / max / range** - Lowest, highest, and spread
-- **percentile_25 / percentile_75 / iqr** - Quartiles and interquartile range
-- **coefficient_of_variation** - Relative variability (SD/mean × 100)
-- **outliers** - Days outside 1 standard deviation (with date, value, z-score)
-
-**Why use this?** Much faster than fetching raw data and calculating in Claude Desktop. A single tool call returns all statistics instantly.
-
-**Example use cases:**
-- "What's my average daily calorie intake this month?"
-- "Which days had unusually high sodium?"
-- "How consistent is my protein intake?"
-
-## Updating Food Items (Cascading Recalculation)
-
-Food items can be updated at any time, even when used in recipes:
-```
-update_food_item(id: 5, calories: 170, protein: 32)
-```
-
-When you update a food item, **cascading recalculation** automatically updates all affected data:
-
-1. **Direct recipes** - All recipes using this food item as an ingredient
-2. **Parent recipes** - All recipes using affected recipes as components (recursive)
-3. **Meal entries** - All logged meals using affected recipes
-4. **Daily totals** - All days containing affected meal entries
-
-**Response includes:**
-- `recipes_recalculated` - Number of recipes that were updated
-- `days_recalculated` - Number of days that were updated
-
-**Example response:**
-```json
-{
-  "success": true,
-  "updated_at": "2026-01-12T10:30:00",
-  "recipes_recalculated": 5,
-  "days_recalculated": 12
-}
-```
-
-This feature is particularly useful for:
-- Correcting nutritional data you entered incorrectly
-- Updating serving sizes or units
-- All historical data automatically reflects corrections
-
----
-
-## Batch Updates (For Updating Many Food Items)
-
-When updating many food items at once (e.g., standardizing all units to 100g/100ml), use batch mode to avoid performance issues.
-
-### Why Use Batch Mode?
-
-Without batch mode, each `update_food_item` triggers a full cascade recalculation:
-- Find all recipes using that item
-- Recalculate each recipe
-- Find all meals using those recipes
-- Recalculate all affected days
-
-If you update 50 food items that all affect the same 10 recipes, those 10 recipes get recalculated **50 times**!
-
-With batch mode, the cascade happens **once** at the end with all affected recipes/days combined.
-
-### Batch Update Workflow
-
-**Step 1: Start batch mode**
-```
-start_batch_update()
-```
-
-**Step 2: Update food items normally**
-```
-update_food_item(id: 1, serving_size: 100, serving_unit: "g", ...)
-update_food_item(id: 2, serving_size: 100, serving_unit: "g", ...)
-update_food_item(id: 3, serving_size: 100, serving_unit: "ml", ...)
-... (as many as needed)
-```
-
-During batch mode, updates happen immediately but cascade recalculation is deferred. You'll see `cascade_deferred: true` in responses.
-
-**Step 3: Finish batch mode**
-```
-finish_batch_update()
-```
-
-This performs ONE combined cascade for all changed food items and returns:
-```json
-{
-  "success": true,
-  "message": "Batch update completed successfully",
-  "food_items_processed": 50,
-  "recipes_recalculated": 10,
-  "days_recalculated": 25
-}
-```
-
-### When to Use Batch Mode
-
-- Standardizing units across all food items
-- Correcting nutrition data for multiple items
-- Any operation touching more than 5-10 food items
-
-### Important Notes
-
-- If Claude Desktop crashes during batch mode, the food item updates are already saved
-- Just call `finish_batch_update()` to complete the cascade
-- Calling `start_batch_update()` when already in batch mode is safe (returns current state)
-
----
+1. User: "Log my lunch: 6oz chicken, cup of rice, salad"
+2. Claude: `search_food_items_batch(["chicken breast", "rice cooked", "mixed salad"])`
+3. Claude: Convert quantities (6oz = 170g, 1 cup rice = 185g)
+4. Claude: `log_meal_items_batch(date, "lunch", [items with quantities])`
+5. Done! One search + one log = 2 tool calls total.
 
 ## Notes
 
 - Dates use ISO format: YYYY-MM-DD
-- Days are created automatically when you log the first meal
-- Recipe nutrition is cached and updates automatically when:
-  - Ingredients are added/removed/updated
-  - A food item used in the recipe is updated
-- Daily nutrition totals are cached and update when meals change
-- Recipes logged in meals cannot be modified (preserves historical accuracy)
-- Recipes can only be deleted if:
-  - Never logged in any meal entries (times_logged == 0)
-  - Not used as a component in any other recipe
+- Days are created automatically when logging meals
+- Nutrition calculations happen automatically based on quantity/unit
+- Daily totals update automatically after logging
 "#;
 
 /// Medication management instructions for AI assistants

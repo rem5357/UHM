@@ -437,6 +437,53 @@ pub struct RecalculateDayNutritionParams {
 }
 
 // ============================================================================
+// Batch Tool Parameter Structs
+// ============================================================================
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchFoodItemsBatchParams {
+    /// List of food item search queries
+    pub queries: Vec<String>,
+    /// Enable fuzzy matching via Haiku API when no results found (default false)
+    #[serde(default)]
+    pub fuzzy_match: bool,
+    /// Maximum results per query (default 5, max 20)
+    #[serde(default = "default_batch_limit")]
+    pub limit_per_query: i64,
+}
+
+fn default_batch_limit() -> i64 { 5 }
+
+/// Single item for batch meal logging
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct BatchMealItemParam {
+    /// Food item ID
+    pub food_item_id: i64,
+    /// Quantity in g/ml/count
+    pub quantity: f64,
+    /// Unit: g, ml, or count
+    pub unit: String,
+    /// Percentage eaten (0-100, default 100)
+    #[serde(default = "default_percent_eaten")]
+    pub percent_eaten: f64,
+    /// Optional notes
+    pub notes: Option<String>,
+}
+
+fn default_percent_eaten() -> f64 { 100.0 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LogMealItemsBatchParams {
+    /// Date in ISO format: YYYY-MM-DD
+    pub date: String,
+    /// Meal type: breakfast, lunch, dinner, snack, or unspecified
+    #[serde(default = "default_meal_type")]
+    pub meal_type: String,
+    /// List of items to log with quantities
+    pub items: Vec<BatchMealItemParam>,
+}
+
+// ============================================================================
 // Medication Parameter Structs
 // ============================================================================
 
@@ -964,6 +1011,14 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Search for multiple food items in one call with FULL nutrition data. Returns complete nutritional info for each match. Use this for meal logging - search once, get all nutrition data needed. Optionally enable fuzzy_match for AI-powered suggestions when no exact match found.")]
+    fn search_food_items_batch(&self, Parameters(p): Parameters<SearchFoodItemsBatchParams>) -> Result<CallToolResult, McpError> {
+        let result = food_items::search_food_items_batch(&self.database, &p.queries, p.fuzzy_match, p.limit_per_query)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Get full details for a food item including nutritional data and recipe usage")]
     fn get_food_item(&self, Parameters(p): Parameters<GetFoodItemParams>) -> Result<CallToolResult, McpError> {
         let result = food_items::get_food_item(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
@@ -1105,7 +1160,11 @@ impl UhmService {
     }
 
     // --- Recipes ---
+    // NOTE: Recipe modification tools are commented out for recipe-free workflow.
+    // get_recipe and list_recipes remain active for historical access.
 
+    /*
+    // COMMENTED OUT - Recipe-free workflow
     #[tool(description = "Create a new recipe (ingredients added separately)")]
     fn create_recipe(&self, Parameters(p): Parameters<CreateRecipeParams>) -> Result<CallToolResult, McpError> {
         let data = RecipeCreate { name: p.name, servings_produced: p.servings_produced, is_favorite: p.is_favorite, notes: p.notes };
@@ -1113,7 +1172,10 @@ impl UhmService {
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+    */
 
+    /*
+    // COMMENTED OUT - Recipe-free workflow (all recipe tools removed from MCP)
     #[tool(description = "Get full recipe details with ingredients and calculated nutrition")]
     fn get_recipe(&self, Parameters(p): Parameters<GetRecipeParams>) -> Result<CallToolResult, McpError> {
         let result = recipes::get_recipe(&self.database, p.id).map_err(|e| McpError::internal_error(e, None))?;
@@ -1230,6 +1292,7 @@ impl UhmService {
         let json = serde_json::json!({"success": deleted, "id": p.id}).to_string();
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+    */
 
     // --- Days ---
 
@@ -1281,6 +1344,21 @@ impl UhmService {
     #[tool(description = "Log a meal entry. Provide either recipe_id OR food_item_id (not both). Automatically creates the day if needed.")]
     fn log_meal(&self, Parameters(p): Parameters<LogMealParams>) -> Result<CallToolResult, McpError> {
         let result = days::log_meal(&self.database, &p.date, &p.meal_type, p.recipe_id, p.food_item_id, p.servings, p.percent_eaten, p.notes)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Log multiple food items to a meal in one call. PREFERRED for meal logging - reduces tool calls by ~50%. Takes date, meal_type, and array of items with food_item_id, quantity (in g/ml/count), unit, and optional percent_eaten. Returns per-item nutrition and day totals.")]
+    fn log_meal_items_batch(&self, Parameters(p): Parameters<LogMealItemsBatchParams>) -> Result<CallToolResult, McpError> {
+        let items: Vec<days::BatchMealItem> = p.items.into_iter().map(|i| days::BatchMealItem {
+            food_item_id: i.food_item_id,
+            quantity: i.quantity,
+            unit: i.unit,
+            percent_eaten: i.percent_eaten,
+            notes: i.notes,
+        }).collect();
+        let result = days::log_meal_items_batch(&self.database, &p.date, &p.meal_type, items)
             .map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -1441,12 +1519,15 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    /*
+    // COMMENTED OUT - Recipe-free workflow
     #[tool(description = "List all recipes with zero uses (not logged in meals, not used as component in other recipes). These are safe to delete with delete_recipe.")]
     fn list_unused_recipes(&self) -> Result<CallToolResult, McpError> {
         let result = recipes::list_unused_recipes(&self.database).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+    */
 
     #[tool(description = "List all days with no meal entries (orphaned days). These are safe to delete with delete_day.")]
     fn list_orphaned_days(&self) -> Result<CallToolResult, McpError> {

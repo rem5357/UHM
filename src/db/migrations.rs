@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 9;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -63,6 +63,16 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 7 {
         migrate_v7(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (7)", [])?;
+    }
+
+    if current_version < 8 {
+        migrate_v8(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (8)", [])?;
+    }
+
+    if current_version < 9 {
+        migrate_v9(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
     }
 
     Ok(())
@@ -570,6 +580,69 @@ fn migrate_v7(conn: &Connection) -> DbResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v8: Direct meal logging with quantity/unit
+fn migrate_v8(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- DIRECT MEAL LOGGING
+        -- Add quantity and unit columns for recipe-free workflow
+        -- ============================================
+        ALTER TABLE meal_entries ADD COLUMN quantity REAL;
+        ALTER TABLE meal_entries ADD COLUMN unit TEXT;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v9: FTS5 full-text search for food items
+fn migrate_v9(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- FTS5 FULL-TEXT SEARCH
+        -- Enables tokenized search for food items
+        -- Handles word-order independence and prefix matching
+        -- ============================================
+
+        -- Create FTS5 virtual table for food items
+        CREATE VIRTUAL TABLE IF NOT EXISTS food_items_fts USING fts5(
+            name,
+            brand,
+            content='food_items',
+            content_rowid='id'
+        );
+
+        -- Populate from existing data
+        INSERT INTO food_items_fts(rowid, name, brand)
+        SELECT id, name, COALESCE(brand, '') FROM food_items;
+
+        -- Trigger: keep FTS in sync on INSERT
+        CREATE TRIGGER food_items_fts_ai AFTER INSERT ON food_items BEGIN
+            INSERT INTO food_items_fts(rowid, name, brand)
+            VALUES (new.id, new.name, COALESCE(new.brand, ''));
+        END;
+
+        -- Trigger: keep FTS in sync on DELETE
+        CREATE TRIGGER food_items_fts_ad AFTER DELETE ON food_items BEGIN
+            INSERT INTO food_items_fts(food_items_fts, rowid, name, brand)
+            VALUES('delete', old.id, old.name, COALESCE(old.brand, ''));
+        END;
+
+        -- Trigger: keep FTS in sync on UPDATE
+        CREATE TRIGGER food_items_fts_au AFTER UPDATE ON food_items BEGIN
+            INSERT INTO food_items_fts(food_items_fts, rowid, name, brand)
+            VALUES('delete', old.id, old.name, COALESCE(old.brand, ''));
+            INSERT INTO food_items_fts(rowid, name, brand)
+            VALUES (new.id, new.name, COALESCE(new.brand, ''));
+        END;
         "#,
     )?;
 

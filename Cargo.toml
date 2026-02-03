@@ -55,5 +55,8 @@ plotters-bitmap = "0.3"
 # Image handling for embedding charts in PDF
 image = "0.25"
 
+# HTTP client for Haiku API calls
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+
 [build-dependencies]
 chrono = "0.4"

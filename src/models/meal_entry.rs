@@ -51,6 +51,10 @@ pub struct MealEntry {
     pub food_item_id: Option<i64>,
     pub servings: f64,
     pub percent_eaten: f64,
+    /// Direct quantity (e.g., 150 for 150g) - used with quantity/unit workflow
+    pub quantity: Option<f64>,
+    /// Unit for direct quantity (g, ml, count)
+    pub unit: Option<String>,
     pub cached_nutrition: Nutrition,
     pub notes: Option<String>,
     pub created_at: String,
@@ -107,6 +111,8 @@ impl MealEntry {
             food_item_id: row.get("food_item_id")?,
             servings: row.get("servings")?,
             percent_eaten: row.get("percent_eaten")?,
+            quantity: row.get("quantity")?,
+            unit: row.get("unit")?,
             cached_nutrition: Nutrition {
                 calories: row.get("cached_calories")?,
                 protein: row.get("cached_protein")?,
@@ -193,6 +199,78 @@ impl MealEntry {
 
         // Recalculate day nutrition
         recalculate_day_nutrition(conn, data.day_id)?;
+
+        Ok(entry)
+    }
+
+    /// Create a meal entry using direct quantity/unit (recipe-free workflow)
+    ///
+    /// This method allows logging food items directly with a quantity in g/ml/count,
+    /// calculating nutrition based on the food item's per-serving values.
+    pub fn create_direct(
+        conn: &Connection,
+        day_id: i64,
+        meal_type: MealType,
+        food_item_id: i64,
+        quantity: f64,
+        unit: &str,
+        percent_eaten: Option<f64>,
+        notes: Option<String>,
+    ) -> DbResult<Self> {
+        let percent_eaten = percent_eaten.unwrap_or(100.0);
+
+        // Get the food item
+        let food_item = FoodItem::get_by_id(conn, food_item_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
+        // Calculate the nutrition multiplier based on quantity and unit
+        let multiplier = calculate_direct_log_multiplier(quantity, unit, &food_item);
+
+        // Scale nutrition by multiplier and percent eaten
+        let nutrition = food_item.nutrition.scale(multiplier * (percent_eaten / 100.0));
+
+        // Use servings=multiplier for backwards compatibility with existing queries
+        let servings = multiplier;
+
+        conn.execute(
+            r#"
+            INSERT INTO meal_entries (
+                day_id, meal_type, recipe_id, food_item_id, servings, percent_eaten,
+                quantity, unit,
+                cached_calories, cached_protein, cached_carbs, cached_fat,
+                cached_fiber, cached_sodium, cached_sugar, cached_saturated_fat,
+                cached_cholesterol, notes
+            )
+            VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            "#,
+            params![
+                day_id,
+                meal_type.as_str(),
+                food_item_id,
+                servings,
+                percent_eaten,
+                quantity,
+                unit,
+                nutrition.calories,
+                nutrition.protein,
+                nutrition.carbs,
+                nutrition.fat,
+                nutrition.fiber,
+                nutrition.sodium,
+                nutrition.sugar,
+                nutrition.saturated_fat,
+                nutrition.cholesterol,
+                notes,
+            ],
+        )?;
+
+        let id = conn.last_insert_rowid();
+        let entry = Self::get_by_id(conn, id)?.ok_or_else(|| {
+            crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)
+        })?;
+
+        // Recalculate day nutrition
+        recalculate_day_nutrition(conn, day_id)?;
 
         Ok(entry)
     }
@@ -495,4 +573,42 @@ pub fn recalculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nut
     Day::update_cached_nutrition(conn, day_id, &total)?;
 
     Ok(total)
+}
+
+/// Calculate the nutrition multiplier for direct quantity/unit logging
+///
+/// This converts a quantity in g/ml/count to a multiplier for the food item's
+/// per-serving nutrition values.
+///
+/// Examples:
+/// - 150g of chicken (food item is per 100g) → 1.5 multiplier
+/// - 2 eggs (food item is per 1 count) → 2.0 multiplier
+/// - 240ml of oat milk (food item is per 100ml) → 2.4 multiplier
+pub fn calculate_direct_log_multiplier(quantity: f64, unit: &str, food_item: &FoodItem) -> f64 {
+    let unit_lower = unit.to_lowercase();
+
+    match unit_lower.as_str() {
+        "g" | "grams" | "gram" => {
+            // Weight-based: divide by grams_per_serving or serving_size
+            let grams_per_serving = food_item.grams_per_serving.unwrap_or(food_item.serving_size);
+            quantity / grams_per_serving
+        }
+        "ml" | "milliliters" | "milliliter" => {
+            // Volume-based: divide by ml_per_serving or serving_size
+            let ml_per_serving = food_item.ml_per_serving.unwrap_or(food_item.serving_size);
+            quantity / ml_per_serving
+        }
+        "count" | "each" | "piece" | "pieces" => {
+            // Count-based: quantity is the number of items, serving_size should be 1
+            quantity / food_item.serving_size
+        }
+        "servings" | "serving" => {
+            // Direct servings (backwards compatible)
+            quantity
+        }
+        _ => {
+            // Unknown unit - treat as servings
+            quantity
+        }
+    }
 }

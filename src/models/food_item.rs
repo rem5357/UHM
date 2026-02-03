@@ -218,7 +218,7 @@ impl FoodItem {
         }
     }
 
-    /// Search food items by name or brand
+    /// Search food items by name or brand (LIKE pattern matching)
     pub fn search(conn: &Connection, query: &str, limit: i64) -> DbResult<Vec<Self>> {
         let search_pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
@@ -232,6 +232,42 @@ impl FoodItem {
 
         let items = stmt
             .query_map([&search_pattern, &limit.to_string()], Self::from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(items)
+    }
+
+    /// Search food items using FTS5 full-text search
+    ///
+    /// Tokenizes the query and searches for any word match in name or brand.
+    /// Returns items ordered by FTS5 rank (relevance).
+    pub fn search_fts(conn: &Connection, query: &str, limit: i64) -> DbResult<Vec<Self>> {
+        // Build FTS5 query: split into words, add prefix matching
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Create FTS5 query with prefix matching: "word1* OR word2*"
+        let fts_query = words
+            .iter()
+            .map(|w| format!("{}*", w.replace('\'', "''"))) // Escape single quotes
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let sql = r#"
+            SELECT f.*
+            FROM food_items f
+            JOIN food_items_fts fts ON f.id = fts.rowid
+            WHERE food_items_fts MATCH ?1
+            ORDER BY rank
+            LIMIT ?2
+        "#;
+
+        let mut stmt = conn.prepare(sql)?;
+
+        let items = stmt
+            .query_map(params![fts_query, limit], Self::from_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(items)

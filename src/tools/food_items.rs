@@ -601,6 +601,264 @@ pub fn list_unused_food_items(db: &Database) -> Result<ListUnusedFoodItemsRespon
     Ok(ListUnusedFoodItemsResponse { items, count })
 }
 
+// ============================================================================
+// Batch Search
+// ============================================================================
+
+/// Full food item summary with all nutrition data (for batch search)
+#[derive(Debug, Serialize)]
+pub struct FoodItemFullSummary {
+    pub id: i64,
+    pub name: String,
+    pub brand: Option<String>,
+    pub serving_size: f64,
+    pub serving_unit: String,
+    pub base_unit_type: Option<String>,
+    pub grams_per_serving: Option<f64>,
+    pub ml_per_serving: Option<f64>,
+    pub calories: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+    pub fiber: f64,
+    pub sodium: f64,
+    pub sugar: f64,
+    pub saturated_fat: f64,
+    pub cholesterol: f64,
+    pub preference: Preference,
+}
+
+impl From<&FoodItem> for FoodItemFullSummary {
+    fn from(item: &FoodItem) -> Self {
+        Self {
+            id: item.id,
+            name: item.name.clone(),
+            brand: item.brand.clone(),
+            serving_size: item.serving_size,
+            serving_unit: item.serving_unit.clone(),
+            base_unit_type: item.base_unit_type.map(|t| t.to_db_str().to_string()),
+            grams_per_serving: item.grams_per_serving,
+            ml_per_serving: item.ml_per_serving,
+            calories: item.nutrition.calories,
+            protein: item.nutrition.protein,
+            carbs: item.nutrition.carbs,
+            fat: item.nutrition.fat,
+            fiber: item.nutrition.fiber,
+            sodium: item.nutrition.sodium,
+            sugar: item.nutrition.sugar,
+            saturated_fat: item.nutrition.saturated_fat,
+            cholesterol: item.nutrition.cholesterol,
+            preference: item.preference,
+        }
+    }
+}
+
+/// Result for a single query in batch search
+#[derive(Debug, Serialize)]
+pub struct BatchQueryResult {
+    pub query: String,
+    pub items: Vec<FoodItemFullSummary>,
+    pub count: usize,
+    /// Fuzzy match suggestion if no exact results found (from Haiku API)
+    pub fuzzy_suggestion: Option<String>,
+}
+
+/// Response for search_food_items_batch
+#[derive(Debug, Serialize)]
+pub struct SearchFoodItemsBatchResponse {
+    pub results: Vec<BatchQueryResult>,
+    pub total_queries: usize,
+    pub total_items_found: usize,
+}
+
+/// Search multiple food items in one call with full nutrition data
+///
+/// This is optimized for the recipe-free workflow where Claude needs to:
+/// 1. Search for multiple foods at once
+/// 2. Get full nutrition data to calculate meal totals
+/// 3. Optionally get fuzzy suggestions for unmatched queries
+///
+/// Search hierarchy:
+/// 1. FTS5 full-text search (handles word tokenization, prefix matching)
+/// 2. LIKE fallback (for edge cases)
+/// 3. Haiku fuzzy suggestion (semantic matching for synonyms)
+pub fn search_food_items_batch(
+    db: &Database,
+    queries: &[String],
+    fuzzy_match: bool,
+    limit_per_query: i64,
+) -> Result<SearchFoodItemsBatchResponse, String> {
+    let limit = limit_per_query.min(20).max(1);
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+
+    let mut results = Vec::new();
+    let mut total_items_found = 0;
+
+    for query in queries {
+        // Try FTS5 search first (handles word tokenization)
+        let mut items = FoodItem::search_fts(&conn, query, limit).unwrap_or_default();
+
+        // Fall back to LIKE search if FTS5 returns nothing
+        if items.is_empty() {
+            items = FoodItem::search(&conn, query, limit)
+                .map_err(|e| format!("Search failed for '{}': {}", query, e))?;
+        }
+
+        let summaries: Vec<FoodItemFullSummary> = items.iter().map(FoodItemFullSummary::from).collect();
+        let count = summaries.len();
+        total_items_found += count;
+
+        // Get fuzzy suggestion if no results and fuzzy_match is enabled
+        let fuzzy_suggestion = if count == 0 && fuzzy_match {
+            get_fuzzy_suggestion(&conn, query).ok().flatten()
+        } else {
+            None
+        };
+
+        results.push(BatchQueryResult {
+            query: query.clone(),
+            items: summaries,
+            count,
+            fuzzy_suggestion,
+        });
+    }
+
+    Ok(SearchFoodItemsBatchResponse {
+        total_queries: queries.len(),
+        total_items_found,
+        results,
+    })
+}
+
+/// Food item with display name for fuzzy matching
+struct FoodItemForFuzzy {
+    display_name: String, // "Brand - Name" or just "Name"
+    name: String,         // Original name for matching
+}
+
+/// Get fuzzy match suggestion using Haiku API (when no exact results found)
+///
+/// This calls Claude Haiku to suggest the closest matching food name
+/// from the database when the user's query doesn't match exactly.
+fn get_fuzzy_suggestion(conn: &rusqlite::Connection, query: &str) -> Result<Option<String>, String> {
+    use std::env;
+
+    // Get API key from environment
+    let api_key = match env::var("ANTHROPIC_API_KEY") {
+        Ok(key) => key,
+        Err(_) => return Ok(None), // No API key, skip fuzzy matching
+    };
+
+    // Get all food items with brand info for context
+    let all_items = FoodItem::list(conn, None, "name", "asc", 500, 0)
+        .map_err(|e| format!("Failed to list food items: {}", e))?;
+
+    if all_items.is_empty() {
+        return Ok(None);
+    }
+
+    // Build display names that include brand for better matching
+    let food_items: Vec<FoodItemForFuzzy> = all_items
+        .iter()
+        .map(|f| {
+            let display_name = match &f.brand {
+                Some(brand) if !brand.is_empty() => format!("{} - {}", brand, f.name),
+                _ => f.name.clone(),
+            };
+            FoodItemForFuzzy {
+                display_name,
+                name: f.name.clone(),
+            }
+        })
+        .collect();
+
+    let names_list = food_items
+        .iter()
+        .map(|f| f.display_name.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build the Haiku request with improved prompt
+    let prompt = format!(
+        "User searched for: \"{}\"\n\n\
+         Available food items (format: \"Brand - Name\" or just \"Name\"):\n{}\n\n\
+         Return the SINGLE best matching item from the list above.\n\
+         - Consider synonyms (shell=tortilla, protein powder=whey)\n\
+         - Consider partial matches and word order flexibility\n\
+         - Return ONLY the exact text as shown in the list, nothing else\n\
+         - If no reasonable match exists, return exactly: NONE",
+        query, names_list
+    );
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", &api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "model": "claude-3-haiku-20240307",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": prompt
+            }]
+        }))
+        .send()
+        .map_err(|e| format!("Haiku API request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse Haiku response: {}", e))?;
+
+    // Extract the suggestion from the response
+    let response_text = body["content"][0]["text"]
+        .as_str()
+        .map(|s| s.trim().to_string());
+
+    let suggestion = response_text.and_then(|text| {
+        if text == "NONE" || text.is_empty() {
+            return None;
+        }
+
+        // Try exact match first (case-insensitive)
+        let text_lower = text.to_lowercase();
+        for item in &food_items {
+            if item.display_name.to_lowercase() == text_lower {
+                return Some(item.display_name.clone());
+            }
+        }
+
+        // Try matching just the name part (in case Haiku returned without brand)
+        for item in &food_items {
+            if item.name.to_lowercase() == text_lower {
+                return Some(item.display_name.clone());
+            }
+        }
+
+        // Try contains match as last resort
+        for item in &food_items {
+            if item.display_name.to_lowercase().contains(&text_lower)
+                || text_lower.contains(&item.name.to_lowercase())
+            {
+                return Some(item.display_name.clone());
+            }
+        }
+
+        None
+    });
+
+    Ok(suggestion)
+}
+
 /// Delete a food item (blocked if used in any recipe or meal entry)
 pub fn delete_food_item(
     db: &Database,
