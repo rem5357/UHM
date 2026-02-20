@@ -475,6 +475,14 @@ pub fn update_vital(
         }
     }
 
+    // Reject group_id = 0 — no valid group has id 0, and the old docs
+    // incorrectly said "use 0 to unlink". Use assign_vital_to_group instead.
+    if let Some(gid) = group_id {
+        if gid <= 0 {
+            return Err("group_id must be a positive ID. To unlink a vital from a group, use assign_vital_to_group with null group_id.".to_string());
+        }
+    }
+
     let data = VitalUpdate {
         timestamp: timestamp.map(String::from),
         value1,
@@ -662,14 +670,18 @@ fn hr_reading_exists(
 }
 
 /// Import Omron BP CSV file
+///
+/// Uses the `csv` crate for robust parsing that handles quoted fields,
+/// embedded commas, and header detection automatically.
 pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImportResponse, String> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-
-    // Read the file
-    let file = File::open(file_path)
+    let file = std::fs::File::open(file_path)
         .map_err(|e| format!("Failed to open file '{}': {}", file_path, e))?;
-    let reader = BufReader::new(file);
+
+    let mut csv_reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(file);
 
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
@@ -680,41 +692,38 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
     let mut first_date: Option<String> = None;
     let mut last_date: Option<String> = None;
 
-    for (line_num, line_result) in reader.lines().enumerate() {
-        let line = line_result.map_err(|e| format!("Error reading line {}: {}", line_num + 1, e))?;
+    for (record_idx, result) in csv_reader.records().enumerate() {
+        let row_num = record_idx + 2; // +2: 1-based + header row
 
-        // Skip header row
-        if line_num == 0 && line.starts_with("Date,") {
-            continue;
-        }
-
-        // Skip empty lines
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // Parse CSV row
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() < 5 {
-            errors.push(format!("Row {}: Not enough fields", line_num + 1));
-            skipped += 1;
-            continue;
-        }
-
-        // Parse date and time
-        let date = match parse_omron_date(fields[0].trim()) {
-            Ok(d) => d,
+        let record = match result {
+            Ok(r) => r,
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: CSV parse error: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
         };
 
-        let time = match parse_omron_time(fields[1].trim()) {
+        if record.len() < 5 {
+            errors.push(format!("Row {}: Not enough fields (need 5, got {})", row_num, record.len()));
+            skipped += 1;
+            continue;
+        }
+
+        // Parse date and time
+        let date = match parse_omron_date(&record[0]) {
+            Ok(d) => d,
+            Err(e) => {
+                errors.push(format!("Row {}: {}", row_num, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let time = match parse_omron_time(&record[1]) {
             Ok(t) => t,
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
@@ -729,46 +738,52 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         last_date = Some(date.clone());
 
         // Parse vitals
-        let systolic: i32 = match fields[2].trim().parse() {
+        let systolic: i32 = match record[2].parse() {
             Ok(v) => v,
             Err(_) => {
-                errors.push(format!("Row {}: Invalid systolic value", line_num + 1));
+                errors.push(format!("Row {}: Invalid systolic value", row_num));
                 skipped += 1;
                 continue;
             }
         };
 
-        let diastolic: i32 = match fields[3].trim().parse() {
+        let diastolic: i32 = match record[3].parse() {
             Ok(v) => v,
             Err(_) => {
-                errors.push(format!("Row {}: Invalid diastolic value", line_num + 1));
+                errors.push(format!("Row {}: Invalid diastolic value", row_num));
                 skipped += 1;
                 continue;
             }
         };
 
-        let pulse: i32 = match fields[4].trim().parse() {
+        let pulse: i32 = match record[4].parse() {
             Ok(v) => v,
             Err(_) => {
-                errors.push(format!("Row {}: Invalid pulse value", line_num + 1));
+                errors.push(format!("Row {}: Invalid pulse value", row_num));
                 skipped += 1;
                 continue;
             }
         };
 
-        // Get TruRead status
-        let truread = if fields.len() > 7 {
-            let tr = fields[7].trim();
+        // Get TruRead status (column index 7 if present)
+        let truread = if record.len() > 7 {
+            let tr = &record[7];
             if tr == "-" { "single".to_string() } else { tr.to_lowercase() }
         } else {
             "single".to_string()
         };
 
-        // Check for duplicate reading (same timestamp + BP values OR same timestamp + HR value)
+        // Duplicate detection: skip if EITHER BP or HR already exists at this timestamp
+        // with matching values. Rationale: Omron exports always produce both BP and HR
+        // in a single row. If either component already exists in the DB, the entire
+        // reading was previously imported (possibly via manual entry or a prior import).
+        // Importing the "missing" half would create an orphaned vital without a matching
+        // group partner. The safer default is to skip the whole row and let the user
+        // re-import or manually add if truly needed.
         let bp_exists = match bp_reading_exists(&conn, &timestamp, systolic as f64, diastolic as f64) {
             Ok(exists) => exists,
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
@@ -777,13 +792,12 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         let hr_exists = match hr_reading_exists(&conn, &timestamp, pulse as f64) {
             Ok(exists) => exists,
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
         };
 
-        // If either BP or HR already exists, consider it a duplicate
         if bp_exists || hr_exists {
             duplicates += 1;
             continue;
@@ -797,7 +811,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         };
 
         let group = VitalGroup::create(&conn, &group_data)
-            .map_err(|e| format!("Row {}: Failed to create group: {}", line_num + 1, e))?;
+            .map_err(|e| format!("Row {}: Failed to create group: {}", row_num, e))?;
 
         // Create BP vital
         let bp_data = VitalCreate {
@@ -811,7 +825,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         };
 
         let bp_vital = Vital::create(&conn, &bp_data)
-            .map_err(|e| format!("Row {}: Failed to create BP vital: {}", line_num + 1, e))?;
+            .map_err(|e| format!("Row {}: Failed to create BP vital: {}", row_num, e))?;
 
         // Create HR vital
         let hr_data = VitalCreate {
@@ -825,10 +839,10 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
         };
 
         let hr_vital = Vital::create(&conn, &hr_data)
-            .map_err(|e| format!("Row {}: Failed to create HR vital: {}", line_num + 1, e))?;
+            .map_err(|e| format!("Row {}: Failed to create HR vital: {}", row_num, e))?;
 
         readings.push(OmronImportRow {
-            row_num: line_num + 1,
+            row_num,
             timestamp,
             systolic,
             diastolic,
@@ -842,7 +856,7 @@ pub fn import_omron_bp_csv(db: &Database, file_path: &str) -> Result<OmronImport
 
     let imported = readings.len();
     let total_rows = imported + duplicates + skipped;
-    let date_range = match (last_date, first_date) {
+    let date_range = match (first_date, last_date) {
         (Some(start), Some(end)) => format!("{} to {}", start, end),
         _ => "N/A".to_string(),
     };
@@ -1851,17 +1865,25 @@ fn weight_reading_exists(
     Ok(count > 0)
 }
 
-/// Import weight data from a simple CSV file.
-/// Format: date,value,unit (header row optional)
+/// Import weight data from a CSV file.
+///
+/// Uses the `csv` crate for robust parsing that handles quoted fields,
+/// embedded commas, and variable column counts automatically.
+///
+/// Format: date,value,unit (header row auto-detected)
 /// Date formats supported: YYYY-MM-DD, MM/DD/YYYY, M/D/YYYY
 /// Unit defaults to "lbs" if not provided or empty
 pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportResponse, String> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-
-    let file = File::open(file_path)
+    let file = std::fs::File::open(file_path)
         .map_err(|e| format!("Failed to open file '{}': {}", file_path, e))?;
-    let reader = BufReader::new(file);
+
+    // Weight CSVs may or may not have headers, so we read raw and detect.
+    // Use flexible(true) since unit column is optional.
+    let mut csv_reader = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_reader(file);
 
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
@@ -1872,63 +1894,65 @@ pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportR
     let mut first_date: Option<String> = None;
     let mut last_date: Option<String> = None;
 
-    for (line_num, line_result) in reader.lines().enumerate() {
-        let line = line_result.map_err(|e| format!("Error reading line {}: {}", line_num + 1, e))?;
+    for (record_idx, result) in csv_reader.records().enumerate() {
+        let row_num = record_idx + 1; // 1-based (no auto-skipped header)
 
-        // Skip header row (if it looks like a header)
-        if line_num == 0 {
-            let lower = line.to_lowercase();
-            if lower.contains("date") || lower.contains("weight") || lower.contains("unit") {
+        let record = match result {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(format!("Row {}: CSV parse error: {}", row_num, e));
+                skipped += 1;
+                continue;
+            }
+        };
+
+        // Skip empty records
+        if record.len() == 0 || (record.len() == 1 && record[0].is_empty()) {
+            continue;
+        }
+
+        // Auto-detect and skip header row
+        if record_idx == 0 {
+            let first_field = record[0].to_lowercase();
+            if first_field.contains("date") || first_field.contains("weight") || first_field.contains("unit") {
                 continue;
             }
         }
 
-        // Skip empty lines
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // Parse CSV row
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.is_empty() {
-            continue;
-        }
-
         // Parse date (required)
-        let date_str = fields[0].trim();
-        let date = match parse_weight_date(date_str) {
+        let date = match parse_weight_date(&record[0]) {
             Ok(d) => d,
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
         };
 
         // Parse value (required)
-        if fields.len() < 2 {
-            errors.push(format!("Row {}: Missing weight value", line_num + 1));
+        if record.len() < 2 {
+            errors.push(format!("Row {}: Missing weight value", row_num));
             skipped += 1;
             continue;
         }
 
-        let value: f64 = match fields[1].trim().parse() {
+        let value: f64 = match record[1].parse() {
             Ok(v) if v > 0.0 => v,
             Ok(_) => {
-                errors.push(format!("Row {}: Weight must be positive", line_num + 1));
+                errors.push(format!("Row {}: Weight must be positive", row_num));
                 skipped += 1;
                 continue;
             }
             Err(_) => {
-                errors.push(format!("Row {}: Invalid weight value '{}'", line_num + 1, fields[1].trim()));
+                errors.push(format!("Row {}: Invalid weight value '{}'", row_num, &record[1]));
                 skipped += 1;
                 continue;
             }
         };
 
         // Parse unit (optional, defaults to lbs)
-        let unit = if fields.len() > 2 && !fields[2].trim().is_empty() {
-            fields[2].trim().to_string()
+        let unit = if record.len() > 2 && !record[2].is_empty() {
+            record[2].to_string()
         } else {
             "lbs".to_string()
         };
@@ -1947,7 +1971,7 @@ pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportR
             }
             Ok(false) => {}
             Err(e) => {
-                errors.push(format!("Row {}: {}", line_num + 1, e));
+                errors.push(format!("Row {}: {}", row_num, e));
                 skipped += 1;
                 continue;
             }
@@ -1968,7 +1992,7 @@ pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportR
         match Vital::create(&conn, &data) {
             Ok(vital) => {
                 readings.push(WeightImportRow {
-                    row_num: line_num + 1,
+                    row_num,
                     date: date.clone(),
                     value,
                     unit,
@@ -1976,7 +2000,7 @@ pub fn import_weight_csv(db: &Database, file_path: &str) -> Result<WeightImportR
                 });
             }
             Err(e) => {
-                errors.push(format!("Row {}: Failed to create vital: {}", line_num + 1, e));
+                errors.push(format!("Row {}: Failed to create vital: {}", row_num, e));
                 skipped += 1;
             }
         }

@@ -58,5 +58,11 @@ image = "0.25"
 # HTTP client for Haiku API calls
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 
+# CSV parsing
+csv = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 chrono = "0.4"

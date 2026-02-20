@@ -18,7 +18,7 @@ pub use day::{Day, DayCreate, DayUpdate};
 pub use food_item::{FoodItem, FoodItemCreate, FoodItemUpdate, Preference};
 pub use meal_entry::{
     MealEntry, MealEntryCreate, MealEntryDetail, MealEntryUpdate, MealType,
-    calculate_day_nutrition, recalculate_day_nutrition,
+    calculate_day_nutrition, recalculate_day_nutrition, calculate_direct_log_multiplier,
 };
 pub use medication::{
     Medication, MedicationCreate, MedicationUpdate, MedicationDeprecate,

@@ -303,6 +303,43 @@ pub fn update_food_item(
 ) -> Result<UpdateFoodItemResponse, String> {
     use crate::models::cascade_recalculate_from_food_item;
 
+    // Validate fields if provided (mirrors add_food_item validation)
+    if let Some(ref name) = data.name {
+        if name.trim().is_empty() {
+            return Err("Food item name cannot be empty".to_string());
+        }
+    }
+    if let Some(serving_size) = data.serving_size {
+        if serving_size <= 0.0 {
+            return Err("serving_size must be greater than 0".to_string());
+        }
+    }
+    if let Some(ref serving_unit) = data.serving_unit {
+        if serving_unit.trim().is_empty() {
+            return Err("serving_unit cannot be empty".to_string());
+        }
+    }
+    if let Some(calories) = data.calories {
+        if calories < 0.0 {
+            return Err("calories cannot be negative".to_string());
+        }
+    }
+    if let Some(protein) = data.protein {
+        if protein < 0.0 {
+            return Err("protein cannot be negative".to_string());
+        }
+    }
+    if let Some(carbs) = data.carbs {
+        if carbs < 0.0 {
+            return Err("carbs cannot be negative".to_string());
+        }
+    }
+    if let Some(fat) = data.fat {
+        if fat < 0.0 {
+            return Err("fat cannot be negative".to_string());
+        }
+    }
+
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
     let updated = FoodItem::update(&conn, id, &data)

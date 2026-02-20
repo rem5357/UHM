@@ -712,7 +712,7 @@ pub struct UpdateVitalParams {
     pub value2: Option<f64>,
     /// New unit
     pub unit: Option<String>,
-    /// Vital group ID (use 0 or null to unlink from group)
+    /// Vital group ID to assign (to unlink from a group, use assign_vital_to_group with null)
     pub group_id: Option<i64>,
     /// New notes
     pub notes: Option<String>,
@@ -1133,9 +1133,9 @@ impl UhmService {
 
     #[tool(description = "Finish batch update mode and perform combined cascade recalculation for all food items that were updated. This is much more efficient than individual cascades when updating many items.")]
     fn finish_batch_update(&self) -> Result<CallToolResult, McpError> {
-        // Get the changed IDs and clear state
+        // Clone IDs without clearing state — keep them until cascade succeeds
         let changed_ids = {
-            let mut state = self.batch_state.lock().unwrap();
+            let state = self.batch_state.lock().unwrap();
 
             if !state.active {
                 let response = FinishBatchUpdateResponse {
@@ -1150,14 +1150,19 @@ impl UhmService {
                 return Ok(CallToolResult::success(vec![Content::text(json)]));
             }
 
-            // End batch mode and take the IDs
-            state.active = false;
-            std::mem::take(&mut state.changed_food_item_ids)
+            state.changed_food_item_ids.clone()
         };
 
-        // Perform the combined cascade
+        // Perform the combined cascade (state still holds IDs if this fails)
         let result = food_items::batch_cascade_recalculate(&self.database, &changed_ids)
             .map_err(|e| McpError::internal_error(e, None))?;
+
+        // Cascade succeeded — NOW clear state
+        {
+            let mut state = self.batch_state.lock().unwrap();
+            state.active = false;
+            state.changed_food_item_ids.clear();
+        }
 
         let response = FinishBatchUpdateResponse {
             success: true,

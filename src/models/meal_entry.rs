@@ -591,15 +591,24 @@ pub fn calculate_direct_log_multiplier(quantity: f64, unit: &str, food_item: &Fo
         "g" | "grams" | "gram" => {
             // Weight-based: divide by grams_per_serving or serving_size
             let grams_per_serving = food_item.grams_per_serving.unwrap_or(food_item.serving_size);
+            if grams_per_serving <= 0.0 {
+                return quantity; // Fallback: treat each unit as one serving
+            }
             quantity / grams_per_serving
         }
         "ml" | "milliliters" | "milliliter" => {
             // Volume-based: divide by ml_per_serving or serving_size
             let ml_per_serving = food_item.ml_per_serving.unwrap_or(food_item.serving_size);
+            if ml_per_serving <= 0.0 {
+                return quantity; // Fallback: treat each unit as one serving
+            }
             quantity / ml_per_serving
         }
         "count" | "each" | "piece" | "pieces" => {
             // Count-based: quantity is the number of items, serving_size should be 1
+            if food_item.serving_size <= 0.0 {
+                return quantity; // Fallback: treat each unit as one serving
+            }
             quantity / food_item.serving_size
         }
         "servings" | "serving" => {

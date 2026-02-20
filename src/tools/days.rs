@@ -423,6 +423,20 @@ pub fn update_meal_entry(
     percent_eaten: Option<f64>,
     notes: Option<String>,
 ) -> Result<Option<UpdateMealEntryResponse>, String> {
+    // Validate servings if provided (mirrors log_meal validation)
+    if let Some(s) = servings {
+        if s <= 0.0 {
+            return Err("Servings must be greater than 0".to_string());
+        }
+    }
+
+    // Validate percent_eaten if provided
+    if let Some(pct) = percent_eaten {
+        if pct < 0.0 || pct > 100.0 {
+            return Err("percent_eaten must be between 0 and 100".to_string());
+        }
+    }
+
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
     let data = MealEntryUpdate {

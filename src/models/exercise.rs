@@ -260,13 +260,17 @@ impl Exercise {
 
     /// Delete an exercise and its segments
     pub fn delete(conn: &Connection, id: i64) -> DbResult<bool> {
+        // Capture day_id BEFORE delete (same pattern as ExerciseSegment::delete)
+        let day_id = match Self::get_by_id(conn, id)? {
+            Some(e) => e.day_id,
+            None => return Ok(false),
+        };
+
         // Segments are deleted via CASCADE
         let rows = conn.execute("DELETE FROM exercises WHERE id = ?1", [id])?;
 
         // Recalculate day's calories burned
-        if let Some(exercise) = Self::get_by_id(conn, id)? {
-            recalculate_day_exercise_calories(conn, exercise.day_id)?;
-        }
+        recalculate_day_exercise_calories(conn, day_id)?;
 
         Ok(rows > 0)
     }
