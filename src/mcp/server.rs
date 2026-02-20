@@ -831,6 +831,18 @@ pub struct GenerateWeightReportParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateExerciseReportParams {
+    /// Start date in YYYY-MM-DD format
+    pub start_date: String,
+    /// End date in YYYY-MM-DD format
+    pub end_date: String,
+    /// Optional clinical notes to include in the report
+    pub notes: Option<Vec<String>>,
+    /// Full path for PDF output. If not provided, saves to C:\Users\rober\Downloads with auto-generated name.
+    pub output_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GenerateDaySummaryParams {
     /// Date in ISO format: YYYY-MM-DD
     pub date: String,
@@ -1992,6 +2004,22 @@ impl UhmService {
             &p.start_date,
             &p.end_date,
             &output_path,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Generate an Exercise Performance PDF report with session metrics, trend charts, and post-exercise BP recovery analysis.")]
+    fn generate_exercise_report(&self, Parameters(p): Parameters<GenerateExerciseReportParams>) -> Result<CallToolResult, McpError> {
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\Exercise_Report_{}_to_{}.pdf", p.start_date, p.end_date)
+        });
+        let result = reports::generate_exercise_report(
+            &self.database,
+            &p.start_date,
+            &p.end_date,
+            &output_path,
+            p.notes,
         ).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))

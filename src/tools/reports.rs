@@ -13,7 +13,7 @@ use printpdf::image_crate::{DynamicImage, RgbImage, ImageFormat};
 use serde::Serialize;
 
 use crate::db::Database;
-use crate::models::{PatientInfo, Vital, VitalType};
+use crate::models::{Day, Exercise, PatientInfo, Vital, VitalType};
 
 // ============================================================================
 // Color Constants (RGB 0-255)
@@ -41,6 +41,16 @@ pub struct GenerateReportResponse {
     pub days_analyzed: i64,
     pub date_range: String,
     pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenerateExerciseReportResponse {
+    pub file_path: String,
+    pub sessions: i64,
+    pub days_with_exercise: i64,
+    pub total_duration_minutes: f64,
+    pub total_distance_miles: f64,
+    pub total_calories_burned: f64,
 }
 
 // ============================================================================
@@ -1286,11 +1296,915 @@ pub fn generate_weight_report(
 }
 
 // ============================================================================
+// Exercise Report Generation (Python-based)
+// ============================================================================
+
+/// Generate an exercise performance PDF report with charts and BP recovery analysis.
+///
+/// Uses Python (matplotlib + reportlab) for chart generation and PDF assembly.
+/// Rust handles data collection from SQLite and generates a Python script with
+/// embedded data literals, then shells out to Python for rendering.
+pub fn generate_exercise_report(
+    db: &Database,
+    start_date: &str,
+    end_date: &str,
+    output_path: &str,
+    notes: Option<Vec<String>>,
+) -> Result<GenerateExerciseReportResponse, String> {
+    let conn = db.get_conn().map_err(|e| e.to_string())?;
+
+    // Get patient info
+    let patient = PatientInfo::get(&conn)
+        .map_err(|e| e.to_string())?
+        .ok_or("Patient info not set. Please call set_patient_info first.")?;
+
+    // Query exercises in date range
+    let mut exercises = Exercise::list_by_date_range(&conn, start_date, end_date)
+        .map_err(|e| e.to_string())?;
+
+    if exercises.is_empty() {
+        return Err(format!("No exercises found between {} and {}", start_date, end_date));
+    }
+
+    // Sort by timestamp ascending for chart display
+    exercises.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    // Build date labels and collect exercise data
+    // We need to get the date from the day table for each exercise
+    let mut exercise_data: Vec<ExerciseDataPoint> = Vec::new();
+    let mut date_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for ex in &exercises {
+        let day = Day::get_by_id(&conn, ex.day_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Day not found for exercise {}", ex.id))?;
+
+        let count = date_counts.entry(day.date.clone()).or_insert(0);
+        *count += 1;
+
+        exercise_data.push(ExerciseDataPoint {
+            date: day.date.clone(),
+            date_occurrence: *count,
+            dur: ex.cached_duration_minutes,
+            dist: ex.cached_distance_miles,
+            cal: ex.cached_calories_burned,
+            timestamp: ex.timestamp.clone(),
+            post_vital_group_id: ex.post_vital_group_id,
+        });
+    }
+
+    // Build date labels — handle multiple sessions per day
+    let date_max_counts: std::collections::HashMap<String, usize> = {
+        let mut m = std::collections::HashMap::new();
+        for dp in &exercise_data {
+            let entry = m.entry(dp.date.clone()).or_insert(0usize);
+            if dp.date_occurrence > *entry {
+                *entry = dp.date_occurrence;
+            }
+        }
+        m
+    };
+
+    let exercise_labels: Vec<String> = exercise_data.iter().map(|dp| {
+        let parsed = NaiveDate::parse_from_str(&dp.date, "%Y-%m-%d");
+        let base_label = match parsed {
+            Ok(d) => format!("{} {:02}", month_abbrev(d.month()), d.day()),
+            Err(_) => dp.date.clone(),
+        };
+        if date_max_counts.get(&dp.date).copied().unwrap_or(1) > 1 {
+            // Multiple sessions on same day — use occurrence number
+            format!("{} ({})", base_label, dp.date_occurrence)
+        } else {
+            base_label
+        }
+    }).collect();
+
+    // Collect post-exercise BP recovery pairs.
+    // Readings may be split across multiple vital groups (e.g., 1st reading in
+    // the linked group, 2nd reading in the next group). Collect all vitals from
+    // all groups within 0-20 min after exercise end, then pair by timestamp.
+    let mut bp_pairs: Vec<BpPair> = Vec::new();
+
+    for dp in &exercise_data {
+        if let Some(pair) = collect_post_exercise_bp(&conn, &dp.timestamp, dp.dur, dp.post_vital_group_id) {
+            bp_pairs.push(pair);
+        }
+    }
+
+    // Compute summary stats
+    let total_sessions = exercise_data.len() as i64;
+    let unique_dates: std::collections::HashSet<&str> = exercise_data.iter()
+        .map(|d| d.date.as_str()).collect();
+    let days_with_exercise = unique_dates.len() as i64;
+    let total_dur: f64 = exercise_data.iter().map(|d| d.dur).sum();
+    let total_dist: f64 = exercise_data.iter().map(|d| d.dist).sum();
+    let total_cal: f64 = exercise_data.iter().map(|d| d.cal).sum();
+
+    // Determine chart mode based on date range span
+    let d1 = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid start_date: {}", e))?;
+    let d2 = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid end_date: {}", e))?;
+    let span_days = (d2 - d1).num_days();
+    let chart_mode = if span_days <= 31 {
+        "bars"
+    } else {
+        "line_only"
+    };
+
+    // Generate Python script
+    let python_script = build_exercise_report_python(
+        &exercise_data,
+        &exercise_labels,
+        &bp_pairs,
+        &patient.name,
+        &patient.dob,
+        start_date,
+        end_date,
+        output_path,
+        chart_mode,
+        &notes,
+    );
+
+    // Write and execute Python script
+    let temp_dir = std::env::temp_dir();
+    let script_path = temp_dir.join("uhm_exercise_report.py");
+    std::fs::write(&script_path, &python_script)
+        .map_err(|e| format!("Failed to write Python script: {}", e))?;
+
+    let output = std::process::Command::new("python")
+        .arg(&script_path)
+        .output()
+        .map_err(|e| format!("Failed to execute Python: {}. Is Python installed?", e))?;
+
+    // Clean up script
+    let _ = std::fs::remove_file(&script_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Python script failed (exit code {:?}):\nstderr: {}\nstdout: {}",
+            output.status.code(), stderr, stdout
+        ));
+    }
+
+    Ok(GenerateExerciseReportResponse {
+        file_path: output_path.to_string(),
+        sessions: total_sessions,
+        days_with_exercise,
+        total_duration_minutes: total_dur,
+        total_distance_miles: total_dist,
+        total_calories_burned: total_cal,
+    })
+}
+
+/// Internal data point for exercise chart rendering
+struct ExerciseDataPoint {
+    date: String,
+    date_occurrence: usize,
+    dur: f64,
+    dist: f64,
+    cal: f64,
+    timestamp: String,
+    post_vital_group_id: Option<i64>,
+}
+
+/// BP recovery pair data
+struct BpPair {
+    min1: f64,
+    sys1: f64,
+    dia1: f64,
+    hr1: f64,
+    min2: f64,
+    sys2: f64,
+    dia2: f64,
+    hr2: f64,
+}
+
+fn month_abbrev(month: u32) -> &'static str {
+    match month {
+        1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+        5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+        9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+        _ => "???",
+    }
+}
+
+/// Parse an ISO timestamp into a NaiveDateTime
+fn parse_timestamp(ts: &str) -> Option<chrono::NaiveDateTime> {
+    // Try common formats
+    chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%SZ")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S"))
+        .ok()
+}
+
+/// Collect post-exercise BP recovery pair by searching all vital groups
+/// in the 0-20 min window after exercise end. Handles both single-group
+/// and split-group patterns (readings across consecutive groups).
+fn collect_post_exercise_bp(
+    conn: &rusqlite::Connection,
+    exercise_timestamp: &str,
+    duration_minutes: f64,
+    linked_group_id: Option<i64>,
+) -> Option<BpPair> {
+    let exercise_start = parse_timestamp(exercise_timestamp)?;
+    let exercise_end = exercise_start + chrono::Duration::seconds((duration_minutes * 60.0) as i64);
+    let window_end = exercise_end + chrono::Duration::minutes(20);
+
+    let end_ts = exercise_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+    let window_end_ts = window_end.format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    // Find all vital groups with timestamps in the post-exercise window.
+    // Also include the explicitly linked group (it may have a timestamp
+    // slightly outside the window due to rounding).
+    let mut group_ids: Vec<i64> = Vec::new();
+
+    // Query groups by timestamp range
+    let mut stmt = conn.prepare(
+        "SELECT id FROM vital_groups WHERE timestamp >= ?1 AND timestamp <= ?2"
+    ).ok()?;
+    let rows = stmt.query_map(rusqlite::params![end_ts, window_end_ts], |row| {
+        row.get::<_, i64>(0)
+    }).ok()?;
+    for row in rows {
+        if let Ok(id) = row {
+            group_ids.push(id);
+        }
+    }
+
+    // Also include the linked group if not already found
+    if let Some(gid) = linked_group_id {
+        if !group_ids.contains(&gid) {
+            group_ids.push(gid);
+        }
+    }
+
+    if group_ids.is_empty() {
+        return None;
+    }
+
+    // Collect all vitals from these groups
+    let mut all_vitals: Vec<Vital> = Vec::new();
+    for gid in &group_ids {
+        if let Ok(vitals) = Vital::list_by_group(conn, *gid) {
+            all_vitals.extend(vitals);
+        }
+    }
+
+    // Filter BP readings to 0-20 min after exercise end
+    let mut bp_readings: Vec<(Vital, f64)> = all_vitals.iter()
+        .filter(|v| v.vital_type == VitalType::BloodPressure)
+        .filter_map(|v| {
+            let ts = parse_timestamp(&v.timestamp)?;
+            let offset_min = (ts - exercise_end).num_seconds() as f64 / 60.0;
+            if offset_min >= -1.0 && offset_min <= 20.0 {
+                Some((v.clone(), offset_min.max(0.0)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    bp_readings.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if bp_readings.len() < 2 {
+        return None;
+    }
+
+    let (bp1, min1) = &bp_readings[0];
+    let (bp2, min2) = &bp_readings[1];
+
+    // Collect all HR readings for closest-match
+    let hr_vitals: Vec<&Vital> = all_vitals.iter()
+        .filter(|v| v.vital_type == VitalType::HeartRate)
+        .collect();
+
+    let hr1 = find_closest_hr(&hr_vitals, &bp1.timestamp);
+    let hr2 = find_closest_hr(&hr_vitals, &bp2.timestamp);
+
+    Some(BpPair {
+        min1: *min1,
+        sys1: bp1.value1,
+        dia1: bp1.value2.unwrap_or(0.0),
+        hr1,
+        min2: *min2,
+        sys2: bp2.value1,
+        dia2: bp2.value2.unwrap_or(0.0),
+        hr2,
+    })
+}
+
+/// Find the HR reading closest in time to a given timestamp
+fn find_closest_hr(hr_readings: &[&Vital], target_ts: &str) -> f64 {
+    let target = match parse_timestamp(target_ts) {
+        Some(t) => t,
+        None => return 0.0,
+    };
+
+    hr_readings.iter()
+        .filter_map(|hr| {
+            parse_timestamp(&hr.timestamp).map(|t| {
+                let diff = (t - target).num_seconds().unsigned_abs();
+                (diff, hr.value1)
+            })
+        })
+        .min_by_key(|(diff, _)| *diff)
+        .map(|(_, val)| val)
+        .unwrap_or(0.0)
+}
+
+/// Build the Python script string with all data embedded
+fn build_exercise_report_python(
+    exercises: &[ExerciseDataPoint],
+    labels: &[String],
+    bp_pairs: &[BpPair],
+    patient_name: &str,
+    patient_dob: &str,
+    start_date: &str,
+    end_date: &str,
+    output_path: &str,
+    chart_mode: &str,
+    notes: &Option<Vec<String>>,
+) -> String {
+    // Build exercise data as Python list of dicts
+    let exercises_py: Vec<String> = exercises.iter().zip(labels.iter()).map(|(ex, label)| {
+        format!(
+            r#"    {{"date_label": "{}", "dur": {:.4}, "dist": {:.6}, "cal": {:.4}}}"#,
+            escape_python_str(label),
+            ex.dur,
+            ex.dist,
+            ex.cal,
+        )
+    }).collect();
+
+    // Build bp_pairs as Python list of dicts
+    let bp_pairs_py: Vec<String> = bp_pairs.iter().map(|p| {
+        format!(
+            r#"    {{"min1": {:.2}, "sys1": {:.1}, "dia1": {:.1}, "hr1": {:.1}, "min2": {:.2}, "sys2": {:.1}, "dia2": {:.1}, "hr2": {:.1}}}"#,
+            p.min1, p.sys1, p.dia1, p.hr1, p.min2, p.sys2, p.dia2, p.hr2,
+        )
+    }).collect();
+
+    // Build notes as Python list or None
+    let notes_py = match notes {
+        Some(n) if !n.is_empty() => {
+            let items: Vec<String> = n.iter()
+                .map(|s| format!(r#"    "{}""#, escape_python_str(s)))
+                .collect();
+            format!("[\n{}\n]", items.join(",\n"))
+        }
+        _ => "None".to_string(),
+    };
+
+    // Escape the output path for Windows
+    let output_path_escaped = output_path.replace('\\', "\\\\");
+
+    format!(
+        r##"# Auto-generated by UHM Exercise Report tool
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+import tempfile
+import os
+
+# ============================================================================
+# Data
+# ============================================================================
+
+exercises = [
+{}
+]
+
+bp_pairs = [
+{}
+]
+
+patient_name = "{}"
+patient_dob = "{}"
+start_date = "{}"
+end_date = "{}"
+output_path = "{}"
+chart_mode = "{}"
+notes = {}
+
+# ============================================================================
+# Colors
+# ============================================================================
+
+CHART_BG = "#0d1b2a"
+SOFT_BLUE = "#4fc3f7"
+GREEN = "#00c853"
+AMBER = "#ffd54f"
+HIGHLIGHT = "#e94560"
+TEXT_WHITE = "#ffffff"
+TEXT_GRAY = "#a0a0b0"
+CARD_BG = "#16213e"
+ACCENT_BLUE = "#0f3460"
+
+# ============================================================================
+# Chart: Exercise Overview (3-panel)
+# ============================================================================
+
+def render_exercise_overview(exercises, chart_mode, output_path):
+    fig, axes = plt.subplots(1, 3, figsize=(10, 3.2), facecolor=CHART_BG)
+    x = np.arange(len(exercises))
+    dates = [e["date_label"] for e in exercises]
+
+    panels = [
+        (axes[0], [e["dur"] for e in exercises], "Duration", "Minutes", SOFT_BLUE),
+        (axes[1], [e["dist"] for e in exercises], "Distance", "Miles", GREEN),
+        (axes[2], [e["cal"] for e in exercises], "Calories Burned", "Calories", AMBER),
+    ]
+
+    for ax, values, title, ylabel, color in panels:
+        ax.set_facecolor(CHART_BG)
+        avg = np.mean(values)
+
+        if chart_mode == "bars":
+            ax.bar(x, values, color=color, alpha=0.85, width=0.7)
+        else:
+            ax.plot(x, values, color=color, linewidth=2, alpha=0.85)
+
+        ax.axhline(y=avg, color=HIGHLIGHT, linestyle='--', linewidth=1.5,
+                    alpha=0.8, label=f'Avg: {{avg:.1f}}')
+        ax.set_ylabel(ylabel, color=TEXT_GRAY, fontsize=8)
+        ax.set_title(title, color=TEXT_WHITE, fontsize=10, fontweight='bold')
+        ax.set_xticks(x)
+
+        rotation = 55 if len(exercises) > 10 else 45
+        fontsize = 5.5 if len(exercises) > 15 else 7
+        ax.set_xticklabels(dates, rotation=rotation, ha='right',
+                           fontsize=fontsize, color=TEXT_GRAY)
+        ax.tick_params(axis='y', colors=TEXT_GRAY, labelsize=7)
+        ax.legend(fontsize=7, loc='lower right', facecolor=CARD_BG,
+                  edgecolor=TEXT_GRAY, labelcolor=TEXT_WHITE)
+        for spine in ['top', 'right']:
+            ax.spines[spine].set_visible(False)
+        for spine in ['left', 'bottom']:
+            ax.spines[spine].set_color(TEXT_GRAY)
+
+    fig.suptitle("Exercise Sessions Overview", color=TEXT_WHITE,
+                 fontsize=12, fontweight='bold', y=1.02)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches='tight',
+                facecolor=CHART_BG, edgecolor='none')
+    plt.close(fig)
+
+# ============================================================================
+# Chart: Speed Trend
+# ============================================================================
+
+def render_speed_trend(exercises, chart_mode, output_path):
+    speeds = [e["dist"] / (e["dur"] / 60) if e["dur"] > 0 else 0 for e in exercises]
+    avg_speed = np.mean(speeds) if speeds else 0
+    x = np.arange(len(exercises))
+    dates = [e["date_label"] for e in exercises]
+
+    fig, ax = plt.subplots(figsize=(9, 2.8), facecolor=CHART_BG)
+    ax.set_facecolor(CHART_BG)
+
+    if chart_mode == "bars":
+        ax.plot(x, speeds, color=HIGHLIGHT, linewidth=2.5, marker='o',
+                markersize=5, markerfacecolor='white',
+                markeredgecolor=HIGHLIGHT, zorder=5)
+    else:
+        ax.plot(x, speeds, color=HIGHLIGHT, linewidth=2, zorder=5)
+
+    ax.axhline(y=avg_speed, color=AMBER, linestyle='--', linewidth=1.5,
+               alpha=0.8, label=f'Avg: {{avg_speed:.2f}} mph')
+    ax.fill_between(x, speeds, avg_speed,
+                    where=[s >= avg_speed for s in speeds],
+                    color=GREEN, alpha=0.15)
+    ax.fill_between(x, speeds, avg_speed,
+                    where=[s < avg_speed for s in speeds],
+                    color=HIGHLIGHT, alpha=0.15)
+
+    ax.set_ylabel("Speed (mph)", color=TEXT_GRAY, fontsize=9)
+    ax.set_title("Pace Trend", color=TEXT_WHITE, fontsize=11, fontweight='bold')
+    ax.set_xticks(x)
+    fontsize = 6 if len(exercises) > 15 else 7
+    ax.set_xticklabels(dates, rotation=55, ha='right',
+                       fontsize=fontsize, color=TEXT_GRAY)
+    ax.tick_params(axis='y', colors=TEXT_GRAY, labelsize=8)
+    ax.legend(fontsize=8, loc='lower right', facecolor=CARD_BG,
+              edgecolor=TEXT_GRAY, labelcolor=TEXT_WHITE)
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+    for spine in ['left', 'bottom']:
+        ax.spines[spine].set_color(TEXT_GRAY)
+    ax.grid(axis='y', color=TEXT_GRAY, alpha=0.15, linewidth=0.5)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches='tight',
+                facecolor=CHART_BG, edgecolor='none')
+    plt.close(fig)
+
+# ============================================================================
+# Chart: BP Recovery Curve
+# ============================================================================
+
+def render_bp_recovery(bp_pairs, output_path):
+    if not bp_pairs:
+        return
+
+    try:
+        from scipy.interpolate import make_interp_spline
+        has_scipy = True
+    except ImportError:
+        has_scipy = False
+
+    avg_early_min = np.mean([p["min1"] for p in bp_pairs])
+    avg_late_min = np.mean([p["min2"] for p in bp_pairs])
+    avg_early_sys = np.mean([p["sys1"] for p in bp_pairs])
+    avg_late_sys = np.mean([p["sys2"] for p in bp_pairs])
+    avg_early_dia = np.mean([p["dia1"] for p in bp_pairs])
+    avg_late_dia = np.mean([p["dia2"] for p in bp_pairs])
+    avg_sys_drop = np.mean([p["sys1"] - p["sys2"] for p in bp_pairs])
+    avg_dia_drop = np.mean([p["dia1"] - p["dia2"] for p in bp_pairs])
+
+    # Extrapolate to t=0 and t=15
+    if avg_late_min == avg_early_min:
+        sys_slope = 0
+        dia_slope = 0
+    else:
+        sys_slope = (avg_late_sys - avg_early_sys) / (avg_late_min - avg_early_min)
+        dia_slope = (avg_late_dia - avg_early_dia) / (avg_late_min - avg_early_min)
+    sys_at_0 = avg_early_sys - sys_slope * avg_early_min
+    sys_at_15 = avg_late_sys + sys_slope * (15 - avg_late_min)
+    dia_at_0 = avg_early_dia - dia_slope * avg_early_min
+    dia_at_15 = avg_late_dia + dia_slope * (15 - avg_late_min)
+
+    t_points = np.array([0, avg_early_min, avg_late_min, 15])
+    sys_points = np.array([sys_at_0, avg_early_sys, avg_late_sys, sys_at_15])
+    dia_points = np.array([dia_at_0, avg_early_dia, avg_late_dia, dia_at_15])
+
+    t_smooth = np.linspace(0, 15, 100)
+    try:
+        if has_scipy:
+            sys_smooth = make_interp_spline(t_points, sys_points, k=2)(t_smooth)
+            dia_smooth = make_interp_spline(t_points, dia_points, k=2)(t_smooth)
+        else:
+            sys_smooth = np.interp(t_smooth, t_points, sys_points)
+            dia_smooth = np.interp(t_smooth, t_points, dia_points)
+    except:
+        sys_smooth = np.interp(t_smooth, t_points, sys_points)
+        dia_smooth = np.interp(t_smooth, t_points, dia_points)
+
+    fig, ax = plt.subplots(figsize=(9, 4.5), facecolor=CHART_BG)
+    ax.set_facecolor(CHART_BG)
+
+    # Individual traces (only if <= 20 sessions)
+    if len(bp_pairs) <= 20:
+        for p in bp_pairs:
+            ax.plot([p["min1"], p["min2"]], [p["sys1"], p["sys2"]],
+                    color=SOFT_BLUE, alpha=0.15, linewidth=1)
+            ax.plot([p["min1"], p["min2"]], [p["dia1"], p["dia2"]],
+                    color=GREEN, alpha=0.15, linewidth=1)
+
+    # Average curves
+    ax.plot(t_smooth, sys_smooth, color=SOFT_BLUE, linewidth=3,
+            label='Avg Systolic', zorder=5)
+    ax.plot(t_smooth, dia_smooth, color=GREEN, linewidth=3,
+            label='Avg Diastolic', zorder=5)
+    ax.fill_between(t_smooth, dia_smooth, sys_smooth,
+                    color=SOFT_BLUE, alpha=0.1)
+
+    # Data points at measurement averages
+    ax.scatter([avg_early_min, avg_late_min],
+              [avg_early_sys, avg_late_sys],
+              color=SOFT_BLUE, s=80, zorder=6,
+              edgecolors='white', linewidths=1.5)
+    ax.scatter([avg_early_min, avg_late_min],
+              [avg_early_dia, avg_late_dia],
+              color=GREEN, s=80, zorder=6,
+              edgecolors='white', linewidths=1.5)
+
+    # Annotations
+    ax.annotate(f'{{avg_early_sys:.0f}}/{{avg_early_dia:.0f}}',
+                xy=(avg_early_min, avg_early_sys),
+                xytext=(avg_early_min+0.5, avg_early_sys+4),
+                color='white', fontsize=9, fontweight='bold',
+                arrowprops=dict(arrowstyle='->', color=TEXT_GRAY, lw=0.8))
+    ax.annotate(f'{{avg_late_sys:.0f}}/{{avg_late_dia:.0f}}',
+                xy=(avg_late_min, avg_late_sys),
+                xytext=(avg_late_min+0.5, avg_late_sys+4),
+                color='white', fontsize=9, fontweight='bold',
+                arrowprops=dict(arrowstyle='->', color=TEXT_GRAY, lw=0.8))
+
+    # Reference lines
+    ax.axhline(y=120, color=HIGHLIGHT, linestyle=':', linewidth=1,
+               alpha=0.5, label='Systolic 120 ref')
+    ax.axhline(y=80, color=AMBER, linestyle=':', linewidth=1,
+               alpha=0.5, label='Diastolic 80 ref')
+
+    # Summary text box
+    textbox = (f"Avg Systolic Drop: {{avg_sys_drop:.0f}} mmHg\n"
+               f"Avg Diastolic Drop: {{avg_dia_drop:.0f}} mmHg\n"
+               f"Recovery Window: ~{{avg_early_min:.0f}} to "
+               f"~{{avg_late_min:.0f}} min")
+    props = dict(boxstyle='round,pad=0.5', facecolor=ACCENT_BLUE,
+                 alpha=0.8, edgecolor=TEXT_GRAY)
+    ax.text(0.02, 0.25, textbox, transform=ax.transAxes, fontsize=8.5,
+            verticalalignment='top', color='white', bbox=props)
+
+    # Styling
+    ax.set_xlabel("Minutes Post-Exercise", color='white', fontsize=11)
+    ax.set_ylabel("mmHg", color='white', fontsize=11)
+    ax.set_title("Post-Exercise BP Recovery — Average Trend",
+                 color='white', fontsize=13, fontweight='bold', pad=15)
+    ax.set_xlim(-0.5, 16)
+    ax.set_ylim(45, 145)
+    ax.legend(fontsize=8, loc='upper right', facecolor=CARD_BG,
+              edgecolor=TEXT_GRAY, labelcolor='white')
+    ax.tick_params(colors=TEXT_GRAY, labelsize=9)
+    for spine in ['top', 'right']:
+        ax.spines[spine].set_visible(False)
+    for spine in ['left', 'bottom']:
+        ax.spines[spine].set_color(TEXT_GRAY)
+    ax.grid(axis='y', color=TEXT_GRAY, alpha=0.15, linewidth=0.5)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches='tight',
+                facecolor=CHART_BG, edgecolor='none')
+    plt.close(fig)
+
+# ============================================================================
+# PDF Assembly
+# ============================================================================
+
+def build_pdf():
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.units import inch
+    from reportlab.lib.colors import HexColor
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                     Table, TableStyle, Image, PageBreak)
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from datetime import date
+
+    tmp = tempfile.gettempdir()
+    overview_png = os.path.join(tmp, "uhm_ex_overview.png")
+    speed_png = os.path.join(tmp, "uhm_ex_speed.png")
+    bp_png = os.path.join(tmp, "uhm_ex_bp.png")
+
+    # Render charts
+    render_exercise_overview(exercises, chart_mode, overview_png)
+    render_speed_trend(exercises, chart_mode, speed_png)
+    if bp_pairs:
+        render_bp_recovery(bp_pairs, bp_png)
+
+    # Build PDF
+    doc = SimpleDocTemplate(output_path, pagesize=letter,
+                            topMargin=0.5*inch, bottomMargin=0.5*inch,
+                            leftMargin=0.6*inch, rightMargin=0.6*inch)
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle('T', parent=styles['Title'],
+        fontSize=22, textColor=HexColor('#1a1a2e'),
+        spaceAfter=4, fontName='Helvetica-Bold')
+    subtitle_style = ParagraphStyle('ST', parent=styles['Normal'],
+        fontSize=11, textColor=HexColor('#666666'),
+        spaceAfter=16, alignment=TA_CENTER)
+    heading_style = ParagraphStyle('H', parent=styles['Heading1'],
+        fontSize=14, textColor=HexColor('#0f3460'),
+        spaceBefore=14, spaceAfter=8, fontName='Helvetica-Bold')
+    body_style = ParagraphStyle('B', parent=styles['Normal'],
+        fontSize=10, textColor=HexColor('#333333'),
+        spaceAfter=6, leading=14)
+    metric_label = ParagraphStyle('ML', parent=styles['Normal'],
+        fontSize=8, textColor=HexColor('#888888'), alignment=TA_CENTER)
+    metric_value = ParagraphStyle('MV', parent=styles['Normal'],
+        fontSize=20, textColor=HexColor('#1a1a2e'),
+        alignment=TA_CENTER, fontName='Helvetica-Bold')
+    metric_unit = ParagraphStyle('MU', parent=styles['Normal'],
+        fontSize=8, textColor=HexColor('#0f3460'), alignment=TA_CENTER)
+
+    story = []
+
+    # --- HEADER ---
+    story.append(Paragraph("Exercise Performance Report", title_style))
+    story.append(Paragraph(
+        f"{{patient_name}} — {{start_date}} to {{end_date}}", subtitle_style))
+
+    # --- METRICS BAR ---
+    total = len(exercises)
+    total_dur = sum(e["dur"] for e in exercises)
+    total_dist = sum(e["dist"] for e in exercises)
+    total_cal = sum(e["cal"] for e in exercises)
+    avg_dur = total_dur / total if total > 0 else 0
+    avg_dist = total_dist / total if total > 0 else 0
+    avg_speed = total_dist / (total_dur / 60) if total_dur > 0 else 0
+    avg_cal = total_cal / total if total > 0 else 0
+
+    story.append(Paragraph("Performance Summary", heading_style))
+    col_w = doc.width / 5
+    metrics_data = [
+        [Paragraph("SESSIONS", metric_label),
+         Paragraph("AVG DURATION", metric_label),
+         Paragraph("AVG DISTANCE", metric_label),
+         Paragraph("AVG SPEED", metric_label),
+         Paragraph("AVG CALORIES", metric_label)],
+        [Paragraph(f"<b>{{total}}</b>", metric_value),
+         Paragraph(f"<b>{{avg_dur:.1f}}</b>", metric_value),
+         Paragraph(f"<b>{{avg_dist:.2f}}</b>", metric_value),
+         Paragraph(f"<b>{{avg_speed:.2f}}</b>", metric_value),
+         Paragraph(f"<b>{{avg_cal:.0f}}</b>", metric_value)],
+        [Paragraph("sessions", metric_unit),
+         Paragraph("minutes", metric_unit),
+         Paragraph("miles", metric_unit),
+         Paragraph("mph", metric_unit),
+         Paragraph("kcal/session", metric_unit)],
+    ]
+    t = Table(metrics_data, colWidths=[col_w]*5)
+    t.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('BACKGROUND', (0,0), (-1,-1), HexColor('#f0f4f8')),
+        ('BOX', (0,0), (-1,-1), 0.5, HexColor('#dde3ea')),
+        ('LINEBELOW', (0,0), (-1,0), 0.5, HexColor('#ccd3da')),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+    ]))
+    story.append(t)
+    story.append(Spacer(1, 6))
+
+    # Totals strip
+    totals_text = (f"<b>Totals:</b>  {{total}} sessions  |  "
+                   f"{{total_dur:.0f}} min ({{total_dur/60:.1f}} hrs)  |  "
+                   f"{{total_dist:.1f}} miles  |  "
+                   f"{{total_cal:.0f}} calories burned")
+    totals_style = ParagraphStyle('TS', parent=body_style,
+        alignment=TA_CENTER, textColor=HexColor('#0f3460'))
+    tt = Table([[Paragraph(totals_text, totals_style)]],
+               colWidths=[doc.width])
+    tt.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), HexColor('#e8edf3')),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('TOPPADDING', (0,0), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+        ('BOX', (0,0), (-1,-1), 0.5, HexColor('#ccd3da')),
+    ]))
+    story.append(tt)
+    story.append(Spacer(1, 10))
+
+    # --- CHARTS ---
+    story.append(Paragraph("Session Details", heading_style))
+    story.append(Image(overview_png, width=doc.width, height=2.8*inch))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("Pace Trend", heading_style))
+    story.append(Image(speed_png, width=doc.width, height=2.4*inch))
+
+    speeds = [e["dist"] / (e["dur"] / 60) if e["dur"] > 0 else 0 for e in exercises]
+    story.append(Spacer(1, 4))
+    note_style = ParagraphStyle('N', parent=body_style,
+        fontSize=9, textColor=HexColor('#555555'), leftIndent=10)
+    story.append(Paragraph(
+        f"Speed range: {{min(speeds):.2f}} — {{max(speeds):.2f}} mph "
+        f"over {{total}} sessions.", note_style))
+
+    # --- PAGE 2: BP RECOVERY ---
+    if bp_pairs and os.path.exists(bp_png):
+        story.append(PageBreak())
+        story.append(Paragraph("Post-Exercise BP Recovery", heading_style))
+        story.append(Image(bp_png, width=doc.width, height=3.8*inch))
+        story.append(Spacer(1, 8))
+
+        # Recovery stats table
+        story.append(Paragraph("Recovery Statistics", heading_style))
+        avg_e_min = np.mean([p["min1"] for p in bp_pairs])
+        avg_l_min = np.mean([p["min2"] for p in bp_pairs])
+        avg_e_sys = np.mean([p["sys1"] for p in bp_pairs])
+        avg_l_sys = np.mean([p["sys2"] for p in bp_pairs])
+        avg_e_dia = np.mean([p["dia1"] for p in bp_pairs])
+        avg_l_dia = np.mean([p["dia2"] for p in bp_pairs])
+        avg_e_hr = np.mean([p["hr1"] for p in bp_pairs])
+        late_hrs = [p["hr2"] for p in bp_pairs if p.get("hr2")]
+        avg_l_hr = np.mean(late_hrs) if late_hrs else 0
+
+        bp_table_data = [
+            ["Metric",
+             f"1st Reading (~{{avg_e_min:.0f}} min)",
+             f"2nd Reading (~{{avg_l_min:.0f}} min)",
+             "Avg Drop"],
+            ["Systolic (mmHg)",
+             f"{{avg_e_sys:.0f}}", f"{{avg_l_sys:.0f}}",
+             f"\u25bc {{avg_e_sys - avg_l_sys:.0f}}"],
+            ["Diastolic (mmHg)",
+             f"{{avg_e_dia:.0f}}", f"{{avg_l_dia:.0f}}",
+             f"\u25bc {{avg_e_dia - avg_l_dia:.0f}}"],
+            ["Heart Rate (bpm)",
+             f"{{avg_e_hr:.0f}}", f"{{avg_l_hr:.0f}}",
+             f"\u25bc {{avg_e_hr - avg_l_hr:.0f}}"],
+        ]
+        w = doc.width
+        bp_t = Table(bp_table_data,
+                     colWidths=[w*0.3, w*0.23, w*0.23, w*0.24])
+        bp_t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), HexColor('#1a1a2e')),
+            ('TEXTCOLOR', (0,0), (-1,0), HexColor('#ffffff')),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 10),
+            ('ALIGN', (1,0), (-1,-1), 'CENTER'),
+            ('BACKGROUND', (0,1), (-1,-1), HexColor('#f0f4f8')),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1),
+             [HexColor('#f0f4f8'), HexColor('#e4e9f0')]),
+            ('BOX', (0,0), (-1,-1), 1, HexColor('#1a1a2e')),
+            ('LINEBELOW', (0,0), (-1,0), 1, HexColor('#0f3460')),
+            ('INNERGRID', (0,0), (-1,-1), 0.5, HexColor('#ccd3da')),
+            ('TOPPADDING', (0,0), (-1,-1), 8),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('TEXTCOLOR', (3,1), (3,-1), HexColor('#00796b')),
+            ('FONTNAME', (3,1), (3,-1), 'Helvetica-Bold'),
+        ]))
+        story.append(bp_t)
+        story.append(Spacer(1, 12))
+
+        # Auto-generated analysis
+        story.append(Paragraph("Analysis", heading_style))
+        quality = ("excellent" if avg_l_sys < 120 and avg_l_dia < 80
+                   else "good" if avg_l_sys < 130 and avg_l_dia < 85
+                   else "moderate")
+        classification = ("well below 120/80" if avg_l_sys < 120 and avg_l_dia < 80
+                          else "near normal" if avg_l_sys < 130 and avg_l_dia < 85
+                          else "mildly elevated")
+        story.append(Paragraph(
+            f"Across {{len(bp_pairs)}} post-exercise measurement sessions, "
+            f"blood pressure consistently shows {{quality}} recovery behavior. "
+            f"The average systolic reading drops {{avg_e_sys - avg_l_sys:.0f}} mmHg "
+            f"between the first and second post-exercise measurements "
+            f"(from ~{{avg_e_sys:.0f}} to ~{{avg_l_sys:.0f}} mmHg), typically "
+            f"within a {{avg_l_min - avg_e_min:.0f}}-minute window.",
+            body_style))
+        if late_hrs:
+            story.append(Paragraph(
+                f"Second readings average {{avg_l_sys:.0f}}/{{avg_l_dia:.0f}} mmHg "
+                f"— {{classification}}. Heart rate recovery settles into the "
+                f"{{min(late_hrs):.0f}}-{{max(late_hrs):.0f}} bpm range within minutes.",
+                body_style))
+        else:
+            story.append(Paragraph(
+                f"Second readings average {{avg_l_sys:.0f}}/{{avg_l_dia:.0f}} mmHg "
+                f"— {{classification}}.",
+                body_style))
+
+    # --- CLINICAL NOTES ---
+    if notes:
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("Clinical Notes", heading_style))
+        for note in notes:
+            story.append(Paragraph(f"\u2022 {{note}}", body_style))
+
+    # --- FOOTER ---
+    story.append(Spacer(1, 20))
+    footer_style = ParagraphStyle('F', parent=body_style,
+        fontSize=8, textColor=HexColor('#999999'), alignment=TA_CENTER)
+    story.append(Paragraph(
+        f"<i>Generated {{date.today().isoformat()}} — "
+        f"UHM (Universal Health Manager)</i>", footer_style))
+
+    doc.build(story)
+
+    # Cleanup temp chart files
+    for f in [overview_png, speed_png, bp_png]:
+        if os.path.exists(f):
+            os.remove(f)
+
+# ============================================================================
+# Main
+# ============================================================================
+
+build_pdf()
+print("OK")
+"##,
+        exercises_py.join(",\n"),
+        bp_pairs_py.join(",\n"),
+        escape_python_str(patient_name),
+        escape_python_str(patient_dob),
+        escape_python_str(start_date),
+        escape_python_str(end_date),
+        output_path_escaped,
+        chart_mode,
+        notes_py,
+    )
+}
+
+/// Escape a string for use in a Python string literal
+fn escape_python_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+}
+
+// ============================================================================
 // Day Summary Report Generation
 // ============================================================================
 
 use crate::models::{
-    Day, Exercise, ExerciseSegment, FoodItem, MealEntry, MealType, Nutrition,
+    ExerciseSegment, FoodItem, MealEntry, MealType, Nutrition,
     Recipe, RecipeIngredient,
 };
 use crate::nutrition::calculate_nutrition_multiplier;

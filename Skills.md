@@ -470,6 +470,42 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/models/food_item.rs` - FoodItem::search_fts()
   - `src/tools/food_items.rs` - Updated search_food_items_batch, fixed get_fuzzy_suggestion
 
+### Phase 24: Exercise Performance PDF Report
+- **Purpose**: Generate a 2-page PDF report covering exercise performance metrics and post-exercise BP recovery analysis
+- **Architecture**: Python script generation — Rust collects data from SQLite, generates a Python script with data embedded as literals, shells out to Python (matplotlib + reportlab) for rendering
+- **New Tool**: `generate_exercise_report`
+  - Input: start_date, end_date, optional notes, optional output_path
+  - Output: PDF saved to `C:\Users\rober\Downloads\Exercise_Report_{start}_to_{end}.pdf`
+  - Returns: file_path, sessions, days_with_exercise, total_duration_minutes, total_distance_miles, total_calories_burned
+- **Page 1 — Exercise Overview**:
+  - Dark-theme charts using matplotlib
+  - 3-panel overview: Duration (min), Distance (mi), Calories per session
+  - Speed trend chart: Average speed per session
+  - Adaptive chart mode: ≤31 days = bar charts, >31 days = smooth line charts
+  - Date labels: "Mon DD" format, with AM/PM or session number for multiple-per-day
+- **Page 2 — Post-Exercise BP Recovery**:
+  - Spline-interpolated BP recovery curves (scipy, with numpy linear fallback)
+  - Stats table with average early/late readings and recovery deltas
+  - Clinical narrative summarizing BP recovery pattern
+  - Only generated when post-exercise BP data exists
+- **Post-Exercise BP Collection** (`collect_post_exercise_bp`):
+  - Queries ALL vital groups with timestamps in 0–20 min window after exercise end
+  - Also includes the exercise's linked `post_vital_group_id` if set
+  - Handles split-group readings (1st BP in group N, 2nd BP in group N+1)
+  - Filters BP readings to 0–20 min offset from exercise end time
+  - Pairs first two BP readings as early/late, matches closest HR readings
+- **Python Dependencies**: matplotlib, reportlab, numpy, scipy
+- **Helper Functions**:
+  - `build_exercise_report_python()` — generates complete Python script string
+  - `collect_post_exercise_bp()` — unified BP pair extraction from any/all post-exercise vital groups
+  - `find_closest_hr()` — matches HR reading closest in timestamp to a BP reading
+  - `parse_timestamp()` — parses "YYYY-MM-DDTHH:MM:SS" to chrono NaiveDateTime
+  - `month_abbrev()` — converts month number to 3-letter abbreviation
+  - `escape_python_str()` — escapes strings for embedding in Python literals
+- **Files Modified**:
+  - `src/tools/reports.rs` — Full implementation (~900 lines): data collection, Python script generation, execution
+  - `src/mcp/server.rs` — GenerateExerciseReportParams struct, tool registration
+
 ## Technology Stack
 
 ### Rust
@@ -585,6 +621,29 @@ Build number starts at 0 and increments to 1 on first build. Each source change 
 - **Compound Items**: For reusable combinations, create a single food item with combined nutrition + recipe in notes
 - **Tool Consolidation**: Batch operations (search_food_items_batch, log_meal_items_batch) reduce round-trips
 
+### Python Script Generation Pattern (for Complex Visualizations)
+- **When to Use**: When Rust-native charting (plotters + printpdf) is insufficient for complex visualizations (dark themes, spline interpolation, fill-between areas)
+- **Pattern**: Rust collects data → builds Python script string with data as literals → writes to temp file → shells out to `python` → captures output → cleans up
+- **Benefits**: Leverages matplotlib's full charting power without adding a Python dependency at compile time
+- **Data Embedding**: Embed data as Python list/dict literals (no file I/O needed in the script)
+- **String Escaping**: Always escape backslashes and quotes when embedding strings in Python literals
+- **Error Handling**: Capture both stdout and stderr from Python process; return meaningful error if Python not found
+- **Cleanup**: Temp script + chart PNGs cleaned up by the Python script itself before exit
+- **Dependencies**: Ensure Python packages are installed (`pip install matplotlib reportlab numpy scipy`)
+- **Gotcha on Windows**: pip may fail with TLS cert errors; use `--trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org` flags
+
+### Post-Exercise Vital Group Split Pattern
+- **Problem**: Post-exercise BP readings may be split across multiple vital groups (1st reading in group N at ~4 min, 2nd reading in group N+1 at ~12 min), but exercise only links to one group via `post_vital_group_id`
+- **Solution**: Don't rely solely on the linked group. Query ALL vital groups with timestamps in the post-exercise window (0–20 min after exercise end), collect ALL vitals from ALL matching groups, then sort and pair.
+- **Key Insight**: Calculate exercise end time = `timestamp + cached_duration_minutes`, then filter vitals to the window [end, end+20min]
+- **Edge Case**: Include a -1 min tolerance to catch readings taken just before the official end time
+- **Pairing Logic**: Sort BP readings by minute offset, take first two as early/late pair
+
+### Adaptive Chart Mode Selection
+- **Principle**: Chart rendering style should adapt to the data density
+- **Pattern**: Use bar charts for small date ranges (≤31 days) where individual sessions are visible, switch to smooth line charts for larger ranges (>31 days) to show trends
+- **Avoid Middle Tiers**: A 3-tier system (bars/line_marks/line_only) adds complexity without clear user value; 2 tiers (bars/lines) is simpler and sufficient
+
 ## Project Structure
 
 ```
@@ -622,7 +681,7 @@ D:\Projects\UHM\
 │   │   ├── medications.rs  # Medication tool functions
 │   │   ├── vitals.rs       # Vital tool functions + stats
 │   │   ├── exercise.rs     # Exercise tool functions + stats
-│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Day Summary)
+│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Exercise, Day Summary)
 │   ├── nutrition/
 │   │   ├── mod.rs
 │   │   ├── units.rs        # Unit types, categories, conversion constants
