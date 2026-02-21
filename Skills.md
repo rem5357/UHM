@@ -506,6 +506,13 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/reports.rs` — Full implementation (~900 lines): data collection, Python script generation, execution
   - `src/mcp/server.rs` — GenerateExerciseReportParams struct, tool registration
 
+### Phase 25: Haiku Model Upgrade
+- **Purpose**: Update fuzzy food search AI model from deprecated Haiku 3 to Haiku 4.5
+- **Change**: Model ID `claude-3-haiku-20240307` → `claude-haiku-4-5-20251001`
+- **Impact**: Improved semantic matching for fuzzy food name suggestions (e.g., "shell" → "tortilla")
+- **Files Modified**:
+  - `src/tools/food_items.rs` - Updated model ID in `get_fuzzy_suggestion`
+
 ## Technology Stack
 
 ### Rust
