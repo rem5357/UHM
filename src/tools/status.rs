@@ -936,6 +936,122 @@ Exercise calories appear in day reports:
 - Vital groups can be created before or after exercise, then linked
 "#;
 
+/// Food item creation instructions for AI assistants
+pub const FOOD_ITEM_INSTRUCTIONS: &str = r#"
+# UHM Food Item Creation Instructions
+
+Call this tool EVERY TIME before using `add_food_item`. These rules prevent downstream
+calculation errors in recipes and meal logging.
+
+## Serving Size Standardization
+
+ALL food items MUST use one of these three bases:
+
+| Type | serving_size | serving_unit | When to use |
+|------|-------------|--------------|-------------|
+| Solid | 100 | "g" | Any food measured by weight |
+| Liquid | 100 | "ml" | Any food measured by volume |
+| Discrete | 1 | "count" | Countable items (1 egg, 1 tortilla, 1 slice) |
+
+**NEVER** use label serving sizes like "1 tbsp", "2 oz", "1 cup", "1 slice (28g)", etc.
+Always convert to the standardized base.
+
+## Label Conversion Process
+
+### Step 1: Read the label's serving size
+Example: "Serving Size: 1 tbsp (15g)" → label serving = 15g
+
+### Step 2: Scale ALL nutritional values to the standard base
+
+**Formula for solids (per 100g):**
+```
+per_100 = label_value × (100 / label_serving_grams)
+```
+
+**Formula for liquids (per 100ml):**
+```
+per_100 = label_value × (100 / label_serving_ml)
+```
+
+**For discrete items (per 1 count):**
+Use the label values for 1 unit directly (1 egg, 1 tortilla, etc.)
+
+### Step 3: Apply to ALL nutritional fields
+Scale every field: calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol.
+Do NOT leave any field at the label's serving size while scaling others.
+
+## Conversion Examples
+
+### Example 1: Spice (solid, small serving)
+Label says: 1 tsp (3g) = 5 cal, 0g fat, 0g protein, 1g carbs, 200mg sodium
+```
+Scale factor = 100 / 3 = 33.33
+calories: 5 × 33.33 = 166.7
+carbs: 1 × 33.33 = 33.3
+sodium: 200 × 33.33 = 6666.7
+→ serving_size: 100, serving_unit: "g"
+```
+
+### Example 2: Cooking oil (liquid)
+Label says: 1 tbsp (15ml) = 120 cal, 14g fat, 0g protein, 0g carbs
+```
+Scale factor = 100 / 15 = 6.67
+calories: 120 × 6.67 = 800.0
+fat: 14 × 6.67 = 93.3
+→ serving_size: 100, serving_unit: "ml"
+```
+
+### Example 3: Tortilla (discrete)
+Label says: 1 tortilla (49g) = 140 cal, 3.5g fat, 4g protein, 22g carbs, 340mg sodium
+```
+Use values as-is for 1 count:
+calories: 140, fat: 3.5, protein: 4, carbs: 22, sodium: 340
+→ serving_size: 1, serving_unit: "count"
+```
+
+### Example 4: Cheese (solid, weight-based)
+Label says: 1 slice (28g) = 110 cal, 9g fat, 7g protein, 0g carbs, 180mg sodium
+```
+Scale factor = 100 / 28 = 3.571
+calories: 110 × 3.571 = 392.9
+fat: 9 × 3.571 = 32.1
+protein: 7 × 3.571 = 25.0
+sodium: 180 × 3.571 = 642.9
+→ serving_size: 100, serving_unit: "g"
+```
+
+## Common Weight Conversions
+
+Use these when labels don't provide gram weights:
+
+| Measure | Approximate Weight |
+|---------|-------------------|
+| 1 tbsp ground spice | 6g |
+| 1 tsp ground spice | 3g |
+| 1 tbsp liquid | 15ml |
+| 1 tsp liquid | 5ml |
+| 1 cup liquid | 240ml |
+| 1 oz | 28.35g |
+| 1 fl oz | 29.57ml |
+
+## Deciding Solid vs. Liquid vs. Discrete
+
+- **Discrete ("count")**: Items naturally counted and used whole (eggs, tortillas, bread slices, burger patties)
+- **Liquid ("ml")**: Pourable liquids (oils, milk, sauces, syrups, broths)
+- **Solid ("g")**: Everything else (cheese, meat, grains, spices, powders, butter)
+
+When in doubt between solid and discrete, prefer "g" — it allows fractional usage in recipes.
+
+## Checklist Before Calling add_food_item
+
+1. ✓ serving_size is 100 (for g/ml) or 1 (for count)
+2. ✓ serving_unit is exactly "g", "ml", or "count"
+3. ✓ ALL nutritional values are scaled to the standard base
+4. ✓ No label serving sizes leaked through (e.g., values for "1 tbsp" instead of "per 100g")
+5. ✓ Sodium is in mg (not g)
+6. ✓ Cholesterol is in mg (not g)
+"#;
+
 /// Runtime status of the UHM service
 #[derive(Debug, Clone, Serialize)]
 pub struct UhmStatus {

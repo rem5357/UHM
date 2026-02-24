@@ -999,6 +999,12 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(MEDICATION_INSTRUCTIONS)]))
     }
 
+    #[tool(description = "Get step-by-step instructions for creating food items with correct serving size standardization. Call this EVERY TIME before using add_food_item.")]
+    fn food_item_instructions(&self) -> Result<CallToolResult, McpError> {
+        use crate::tools::status::FOOD_ITEM_INSTRUCTIONS;
+        Ok(CallToolResult::success(vec![Content::text(FOOD_ITEM_INSTRUCTIONS)]))
+    }
+
     // --- Food Items ---
 
     #[tool(description = "Create a new food item with nutritional information")]
@@ -2065,7 +2071,7 @@ impl ServerHandler for UhmService {
             },
             instructions: Some(
                 "Universal Health Manager (UHM) - Health, nutrition, vital sign, and exercise tracking. \
-                 IMPORTANT: Call meal_instructions for food logging, medication_instructions for meds, vital_instructions for vitals, exercise_instructions for exercise. \
+                 IMPORTANT: Call meal_instructions for food logging, food_item_instructions before add_food_item, medication_instructions for meds, vital_instructions for vitals, exercise_instructions for exercise. \
                  Food: add/search/get/list/update/delete_food_item. \
                  Recipes: create/get/list/update/delete_recipe, add/update/remove_recipe_ingredient, \
                  add/update/remove_recipe_component, recalculate_recipe_nutrition. \
