@@ -410,6 +410,197 @@ pub fn generate_bp_chart(daily_stats: &[DailyBPStats], width: u32, height: u32) 
     Ok(png_bytes)
 }
 
+// ============================================================================
+// BP Time-of-Day Types and Chart Generation
+// ============================================================================
+
+/// Time-of-day bucket labels (3-hour windows)
+const TIME_BUCKET_LABELS: [&str; 8] = [
+    "12a-3a", "3a-6a", "6a-9a", "9a-12p",
+    "12p-3p", "3p-6p", "6p-9p", "9p-12a",
+];
+
+/// Statistics for a single time-of-day bucket
+#[derive(Debug, Clone)]
+struct TimeBucketStats {
+    label: &'static str,
+    systolic_avg: Option<f64>,
+    diastolic_avg: Option<f64>,
+    count: usize,
+}
+
+/// Aggregate BP readings into 8 three-hour time-of-day buckets
+fn aggregate_time_of_day_bp(vitals: &[Vital]) -> Vec<TimeBucketStats> {
+    let mut buckets: Vec<(Vec<f64>, Vec<f64>)> = vec![(Vec::new(), Vec::new()); 8];
+
+    for vital in vitals {
+        if vital.vital_type != VitalType::BloodPressure {
+            continue;
+        }
+        // Parse hour from timestamp "YYYY-MM-DDTHH:MM:SS"
+        let hour = vital.timestamp
+            .split('T')
+            .nth(1)
+            .and_then(|t| t.split(':').next())
+            .and_then(|h| h.parse::<usize>().ok());
+
+        if let Some(h) = hour {
+            let bucket = h / 3; // 0..7
+            if bucket < 8 {
+                buckets[bucket].0.push(vital.value1);
+                if let Some(dia) = vital.value2 {
+                    buckets[bucket].1.push(dia);
+                }
+            }
+        }
+    }
+
+    buckets.iter().enumerate().map(|(i, (sys, dia))| {
+        TimeBucketStats {
+            label: TIME_BUCKET_LABELS[i],
+            systolic_avg: if sys.is_empty() { None } else {
+                Some(sys.iter().sum::<f64>() / sys.len() as f64)
+            },
+            diastolic_avg: if dia.is_empty() { None } else {
+                Some(dia.iter().sum::<f64>() / dia.len() as f64)
+            },
+            count: sys.len(),
+        }
+    }).collect()
+}
+
+/// Generate BP time-of-day chart as PNG bytes
+fn generate_bp_time_of_day_chart(buckets: &[TimeBucketStats], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    use plotters::prelude::*;
+
+    let mut buffer = vec![0u8; (width * height * 3) as usize];
+
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (width, height))
+            .into_drawing_area();
+        root.fill(&WHITE).map_err(|e| e.to_string())?;
+
+        // Y axis range
+        let mut y_min: f64 = 200.0;
+        let mut y_max: f64 = 0.0;
+        for b in buckets {
+            if let Some(s) = b.systolic_avg {
+                y_max = y_max.max(s);
+            }
+            if let Some(d) = b.diastolic_avg {
+                y_min = y_min.min(d);
+            }
+        }
+        y_min = (y_min - 15.0).max(40.0);
+        y_max = (y_max + 15.0).min(200.0);
+
+        let labels: Vec<String> = buckets.iter().map(|b| b.label.to_string()).collect();
+        let labels_len = labels.len();
+
+        let mut chart = ChartBuilder::on(&root)
+            .margin(20)
+            .x_label_area_size(35)
+            .y_label_area_size(50)
+            .build_cartesian_2d(0i32..7i32, y_min..y_max)
+            .map_err(|e| e.to_string())?;
+
+        chart.configure_mesh()
+            .x_labels(8)
+            .x_label_formatter(&|x| {
+                let idx = *x as usize;
+                if idx < labels_len { labels[idx].clone() } else { String::new() }
+            })
+            .y_desc("mmHg")
+            .draw()
+            .map_err(|e| e.to_string())?;
+
+        // Reference lines: 140 (red), 120 (orange), 80 (blue)
+        for (threshold, color, opacity) in [
+            (140.0, RGBColor(255, 0, 0), 0.4),
+            (120.0, RGBColor(255, 165, 0), 0.4),
+            (80.0, RGBColor(0, 112, 192), 0.3),
+        ] {
+            if threshold >= y_min && threshold <= y_max {
+                chart.draw_series(std::iter::once(PathElement::new(
+                    vec![(0i32, threshold), (7i32, threshold)],
+                    ShapeStyle::from(&color.mix(opacity)).stroke_width(1),
+                ))).map_err(|e| e.to_string())?;
+            }
+        }
+
+        // Systolic line — segments between non-empty adjacent buckets
+        let sys_points: Vec<(i32, f64)> = buckets.iter().enumerate()
+            .filter_map(|(i, b)| b.systolic_avg.map(|v| (i as i32, v)))
+            .collect();
+
+        if sys_points.len() >= 2 {
+            // Draw connected segments only between adjacent buckets with data
+            for window in sys_points.windows(2) {
+                chart.draw_series(LineSeries::new(
+                    vec![window[0], window[1]],
+                    RED.stroke_width(3),
+                )).map_err(|e| e.to_string())?;
+            }
+        }
+        // Systolic data points
+        chart.draw_series(sys_points.iter().map(|(x, y)| {
+            Circle::new((*x, *y), 5, RED.filled())
+        })).map_err(|e| e.to_string())?;
+
+        // Diastolic line
+        let dia_points: Vec<(i32, f64)> = buckets.iter().enumerate()
+            .filter_map(|(i, b)| b.diastolic_avg.map(|v| (i as i32, v)))
+            .collect();
+
+        if dia_points.len() >= 2 {
+            for window in dia_points.windows(2) {
+                chart.draw_series(LineSeries::new(
+                    vec![window[0], window[1]],
+                    BLUE.stroke_width(3),
+                )).map_err(|e| e.to_string())?;
+            }
+        }
+        // Diastolic data points
+        chart.draw_series(dia_points.iter().map(|(x, y)| {
+            Circle::new((*x, *y), 5, BLUE.filled())
+        })).map_err(|e| e.to_string())?;
+
+        // Legend
+        // Add dummy series for legend labels
+        chart.draw_series(LineSeries::new(
+            vec![(-10i32, 0.0)], RED.stroke_width(3),
+        )).map_err(|e| e.to_string())?
+        .label("Systolic (avg)")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], RED.stroke_width(3)));
+
+        chart.draw_series(LineSeries::new(
+            vec![(-10i32, 0.0)], BLUE.stroke_width(3),
+        )).map_err(|e| e.to_string())?
+        .label("Diastolic (avg)")
+        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE.stroke_width(3)));
+
+        chart.configure_series_labels()
+            .position(SeriesLabelPosition::UpperRight)
+            .background_style(WHITE.mix(0.8))
+            .border_style(BLACK)
+            .draw()
+            .map_err(|e| e.to_string())?;
+
+        root.present().map_err(|e| e.to_string())?;
+    }
+
+    // Convert RGB buffer to PNG
+    let img = RgbImage::from_raw(width, height, buffer)
+        .ok_or("Failed to create image from buffer")?;
+
+    let mut png_bytes = Vec::new();
+    let dyn_img = DynamicImage::ImageRgb8(img);
+    dyn_img.write_to(&mut std::io::Cursor::new(&mut png_bytes), ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+
+    Ok(png_bytes)
+}
+
 /// Generate HR trend chart as PNG bytes
 pub fn generate_hr_chart(daily_stats: &[DailyHRStats], width: u32, height: u32) -> Result<Vec<u8>, String> {
     use plotters::prelude::*;
@@ -800,6 +991,126 @@ pub fn generate_bp_report(
                 add_text(&layer2, &font, &format!("- {}", note), Mm(margin_left_p2), Mm(y2), 9.0, COLOR_BLACK);
                 y2 -= 5.0;
             }
+        }
+    }
+
+    // ========================================================================
+    // Page 3 - Landscape: BP Time-of-Day Analysis
+    // ========================================================================
+    let tod_buckets = aggregate_time_of_day_bp(&vitals);
+    let buckets_with_data = tod_buckets.iter().filter(|b| b.count > 0).count();
+
+    // Only add page if data spans at least 2 time windows
+    if buckets_with_data >= 2 {
+        let (page3, layer3) = doc.add_page(Mm(279.4), Mm(215.9), "Time-of-Day Page");
+        let layer3 = doc.get_page(page3).get_layer(layer3);
+
+        let landscape_height_p3 = 215.9_f32;
+        let margin_left_p3 = 15.0_f32;
+        let mut y3 = landscape_height_p3 - 20.0;
+
+        // Header
+        add_text(&layer3, &font_bold, "Blood Pressure by Time of Day", Mm(margin_left_p3), Mm(y3), 16.0, COLOR_BP_TITLE);
+        add_text(&layer3, &font, &format!("{} - {}", start_date, end_date), Mm(140.0), Mm(y3), 11.0, COLOR_BLACK);
+        y3 -= 7.0;
+        add_text(&layer3, &font, &format!("Patient: {} | {} readings in {} time windows",
+            patient.name, total_readings, buckets_with_data), Mm(margin_left_p3), Mm(y3), 10.0, COLOR_GRAY);
+        y3 -= 8.0;
+
+        // Chart
+        match generate_bp_time_of_day_chart(&tod_buckets, 1000, 380) {
+            Ok(png_bytes) => {
+                let dynamic_image = printpdf::image_crate::load_from_memory(&png_bytes)
+                    .map_err(|e| e.to_string())?;
+                let pdf_image = Image::from_dynamic_image(&dynamic_image);
+
+                let transform = ImageTransform {
+                    translate_x: Some(Mm(margin_left_p3)),
+                    translate_y: Some(Mm(y3 - 85.0)),
+                    dpi: Some(120.0),
+                    ..Default::default()
+                };
+
+                pdf_image.add_to_layer(layer3.clone(), transform);
+                y3 -= 90.0;
+            }
+            Err(e) => {
+                add_text(&layer3, &font, &format!("Chart error: {}", e), Mm(margin_left_p3), Mm(y3 - 10.0), 9.0, COLOR_HIGH);
+                y3 -= 15.0;
+            }
+        }
+
+        // Reference line legend
+        y3 -= 5.0;
+        add_text(&layer3, &font_bold, "Reference Lines:", Mm(margin_left_p3), Mm(y3), 9.0, COLOR_BLACK);
+        add_text(&layer3, &font, "120 mmHg (Normal SYS ceiling)", Mm(55.0), Mm(y3), 9.0, COLOR_ELEVATED);
+        add_text(&layer3, &font, "140 mmHg (Stage 1 HTN)", Mm(130.0), Mm(y3), 9.0, COLOR_HIGH);
+        add_text(&layer3, &font, "80 mmHg (Normal DIA ceiling)", Mm(200.0), Mm(y3), 9.0, COLOR_BRADYCARDIA);
+        y3 -= 10.0;
+
+        // Stats table
+        add_text(&layer3, &font_bold, "Time Window Statistics", Mm(margin_left_p3), Mm(y3), 12.0, COLOR_BLACK);
+        y3 -= 7.0;
+
+        // Table header — two columns of 4 windows each, side by side
+        let tod_col_widths: [f32; 4] = [22.0, 24.0, 24.0, 16.0];
+        let tod_headers = ["Window", "Sys Avg", "Dia Avg", "N"];
+        let col_offset_right: f32 = 100.0;
+
+        // Left header
+        let mut col_x = margin_left_p3;
+        for (i, header) in tod_headers.iter().enumerate() {
+            add_text(&layer3, &font_bold, header, Mm(col_x), Mm(y3), 9.0, COLOR_BLACK);
+            col_x += tod_col_widths[i];
+        }
+        // Right header
+        col_x = margin_left_p3 + col_offset_right;
+        for (i, header) in tod_headers.iter().enumerate() {
+            add_text(&layer3, &font_bold, header, Mm(col_x), Mm(y3), 9.0, COLOR_BLACK);
+            col_x += tod_col_widths[i];
+        }
+        y3 -= 1.5;
+        add_line(&layer3, Mm(margin_left_p3), Mm(y3), Mm(margin_left_p3 + 85.0), Mm(y3), COLOR_LIGHT_GRAY, 0.3);
+        add_line(&layer3, Mm(margin_left_p3 + col_offset_right), Mm(y3), Mm(margin_left_p3 + col_offset_right + 85.0), Mm(y3), COLOR_LIGHT_GRAY, 0.3);
+        y3 -= 4.0;
+
+        // Table rows — 4 per column
+        for row in 0..4usize {
+            for col_side in 0..2usize {
+                let bucket_idx = row + col_side * 4;
+                let b = &tod_buckets[bucket_idx];
+                let base_x = margin_left_p3 + (col_side as f32) * col_offset_right;
+
+                add_text(&layer3, &font, b.label, Mm(base_x), Mm(y3), 9.0, COLOR_BLACK);
+
+                match b.systolic_avg {
+                    Some(sys) => {
+                        let sys_color = if sys >= 140.0 { COLOR_HIGH }
+                            else if sys >= 120.0 { COLOR_ELEVATED }
+                            else { COLOR_NORMAL };
+                        add_text(&layer3, &font_bold, &format!("{:.0}", sys), Mm(base_x + tod_col_widths[0]), Mm(y3), 9.0, sys_color);
+                    }
+                    None => {
+                        add_text(&layer3, &font, "\u{2014}", Mm(base_x + tod_col_widths[0]), Mm(y3), 9.0, COLOR_GRAY);
+                    }
+                }
+
+                match b.diastolic_avg {
+                    Some(dia) => {
+                        let dia_color = if dia >= 90.0 { COLOR_HIGH }
+                            else if dia >= 80.0 { COLOR_ELEVATED }
+                            else { COLOR_NORMAL };
+                        add_text(&layer3, &font_bold, &format!("{:.0}", dia), Mm(base_x + tod_col_widths[0] + tod_col_widths[1]), Mm(y3), 9.0, dia_color);
+                    }
+                    None => {
+                        add_text(&layer3, &font, "\u{2014}", Mm(base_x + tod_col_widths[0] + tod_col_widths[1]), Mm(y3), 9.0, COLOR_GRAY);
+                    }
+                }
+
+                let count_str = if b.count > 0 { b.count.to_string() } else { "\u{2014}".to_string() };
+                add_text(&layer3, &font, &count_str, Mm(base_x + tod_col_widths[0] + tod_col_widths[1] + tod_col_widths[2]), Mm(y3), 9.0, COLOR_BLACK);
+            }
+            y3 -= 5.0;
         }
     }
 

@@ -533,6 +533,25 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/reports.rs` - generate_medications_report(), GenerateMedicationsReportResponse, COLOR_MED_TITLE, format_dosage_amount()
   - `src/mcp/server.rs` - GenerateMedicationsReportParams, tool handler, updated server instructions
 
+### Phase 27: BP Time-of-Day Chart Page
+- **Purpose**: Visualize circadian BP patterns by appending a time-of-day analysis page to the existing BP report
+- **Problem Solved**: Feb 2026 data showed clear pattern (post-exercise afternoon avg ~112/60 vs evening ~148/77) that wasn't visible in daily trend charts
+- **No API Changes**: Same `generate_bp_report` signature — Page 3 auto-appended when data spans 2+ time windows
+- **Page 3 Layout** (Landscape):
+  - Header: "Blood Pressure by Time of Day" with patient name, reading count, window count
+  - Line chart (plotters): red systolic + blue diastolic lines with data point markers
+  - 8 three-hour time buckets (12a-3a through 9p-12a), bucketed by `hour / 3`
+  - Reference lines: 120 mmHg (orange, normal SYS ceiling), 140 mmHg (red, Stage 1 HTN), 80 mmHg (blue, normal DIA ceiling)
+  - Gaps in chart lines for empty time windows
+  - Reference line legend (color-coded)
+  - Stats table: 2 columns x 4 rows, color-coded values (green < 120, amber 120-139, red >= 140 for systolic; green < 80, amber 80-89, red >= 90 for diastolic), em-dash for empty windows
+- **New Functions**:
+  - `aggregate_time_of_day_bp()` — buckets vitals into 8 windows, returns per-bucket averages and counts
+  - `generate_bp_time_of_day_chart()` — plotters BitMapBackend chart with reference lines, connected line segments, legend
+  - `TimeBucketStats` struct — label, systolic_avg, diastolic_avg, count per window
+- **Files Modified**:
+  - `src/tools/reports.rs` - New functions + Page 3 insertion in generate_bp_report()
+
 ## Technology Stack
 
 ### Rust
