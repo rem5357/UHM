@@ -225,12 +225,25 @@ pub fn add_food_item(db: &Database, data: FoodItemCreate) -> Result<AddFoodItemR
 }
 
 /// Search food items by name or brand
+///
+/// Search hierarchy: FTS5 → LIKE → strsim Jaro-Winkler
 pub fn search_food_items(db: &Database, query: &str, limit: i64) -> Result<SearchFoodItemsResponse, String> {
     let limit = limit.min(100).max(1);
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
-    let items = FoodItem::search(&conn, query, limit)
-        .map_err(|e| format!("Search failed: {}", e))?;
+    // Tier 1: FTS5
+    let mut items = FoodItem::search_fts(&conn, query, limit).unwrap_or_default();
+
+    // Tier 2: LIKE fallback
+    if items.is_empty() {
+        items = FoodItem::search(&conn, query, limit)
+            .map_err(|e| format!("Search failed: {}", e))?;
+    }
+
+    // Tier 3: strsim Jaro-Winkler fuzzy
+    if items.is_empty() {
+        items = FoodItem::search_fuzzy(&conn, query, limit).unwrap_or_default();
+    }
 
     let summaries: Vec<FoodItemSummary> = items.iter().map(FoodItemSummary::from).collect();
     let total = summaries.len();
