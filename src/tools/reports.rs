@@ -13,7 +13,7 @@ use printpdf::image_crate::{DynamicImage, RgbImage, ImageFormat};
 use serde::Serialize;
 
 use crate::db::Database;
-use crate::models::{Day, Exercise, PatientInfo, Vital, VitalType};
+use crate::models::{Day, Exercise, MedType, Medication, PatientInfo, Vital, VitalType};
 
 // ============================================================================
 // Color Constants (RGB 0-255)
@@ -25,6 +25,7 @@ const COLOR_NORMAL: (u8, u8, u8) = (0, 176, 80);        // Green
 const COLOR_ELEVATED: (u8, u8, u8) = (255, 165, 0);     // Orange
 const COLOR_HIGH: (u8, u8, u8) = (255, 0, 0);           // Red
 const COLOR_BRADYCARDIA: (u8, u8, u8) = (0, 112, 192);  // Blue
+const COLOR_MED_TITLE: (u8, u8, u8) = (0, 112, 192);   // Blue for medication headers
 const COLOR_BLACK: (u8, u8, u8) = (0, 0, 0);
 const COLOR_GRAY: (u8, u8, u8) = (128, 128, 128);
 const COLOR_LIGHT_GRAY: (u8, u8, u8) = (220, 220, 220);
@@ -40,6 +41,14 @@ pub struct GenerateReportResponse {
     pub total_readings: i64,
     pub days_analyzed: i64,
     pub date_range: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenerateMedicationsReportResponse {
+    pub success: bool,
+    pub file_path: String,
+    pub medication_count: usize,
     pub message: String,
 }
 
@@ -2662,4 +2671,271 @@ pub fn generate_day_summary(
             protein_status,
         },
     })
+}
+
+// ============================================================================
+// Medications Report Generation
+// ============================================================================
+
+/// Generate a Medication List PDF report
+pub fn generate_medications_report(
+    db: &Database,
+    patient_name: &str,
+    output_path: &str,
+    active_only: bool,
+    include_notes: bool,
+) -> Result<GenerateMedicationsReportResponse, String> {
+    let conn = db.get_conn().map_err(|e| e.to_string())?;
+
+    // Get patient info for header
+    let patient = PatientInfo::get(&conn)
+        .map_err(|e| e.to_string())?
+        .ok_or("Patient info not set. Please call set_patient_info first.")?;
+
+    // Fetch medications
+    let meds = Medication::list(&conn, active_only, None)
+        .map_err(|e| e.to_string())?;
+
+    if meds.is_empty() {
+        return Err(if active_only {
+            "No active medications found.".to_string()
+        } else {
+            "No medications found.".to_string()
+        });
+    }
+
+    let medication_count = meds.len();
+
+    // Group by MedType
+    let mut grouped: std::collections::HashMap<MedType, Vec<&Medication>> = std::collections::HashMap::new();
+    for med in &meds {
+        grouped.entry(med.med_type).or_default().push(med);
+    }
+
+    // Sort group keys by sort_order
+    let mut type_keys: Vec<MedType> = grouped.keys().cloned().collect();
+    type_keys.sort_by_key(|t| t.sort_order());
+
+    // Create PDF
+    let (doc, page1, layer1) = PdfDocument::new(
+        "Medication List",
+        Mm(215.9),
+        Mm(279.4),
+        "Layer 1",
+    );
+
+    let font = doc.add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| e.to_string())?;
+    let font_bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| e.to_string())?;
+
+    let page_height: f32 = 279.4;
+    let margin_left: f32 = 15.0;
+    let margin_right: f32 = 200.0;
+    let footer_y: f32 = 15.0;
+    let min_y: f32 = 30.0;
+
+    let mut current_page = doc.get_page(page1).get_layer(layer1);
+    let mut y = page_height - 20.0;
+    let mut page_num: u32 = 1;
+
+    // --- Helper closure for header ---
+    let render_header = |layer: &PdfLayerReference, y: &mut f32, page: u32| {
+        *y = page_height - 20.0;
+
+        // Title
+        add_text(layer, &font_bold, "Medication List", Mm(margin_left), Mm(*y), 18.0, COLOR_MED_TITLE);
+        *y -= 8.0;
+
+        // Patient info
+        add_text(layer, &font, &format!("Patient: {}", patient_name), Mm(margin_left), Mm(*y), 11.0, COLOR_BLACK);
+        add_text(layer, &font, &format!("DOB: {}", patient.dob), Mm(120.0), Mm(*y), 11.0, COLOR_BLACK);
+        *y -= 6.0;
+
+        let now = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let status_label = if active_only { "Active medications only" } else { "All medications (active and inactive)" };
+        add_text(layer, &font, status_label, Mm(margin_left), Mm(*y), 10.0, COLOR_GRAY);
+        add_text(layer, &font, &format!("Generated: {}", now), Mm(120.0), Mm(*y), 10.0, COLOR_GRAY);
+        *y -= 6.0;
+
+        // Divider
+        add_line(layer, Mm(margin_left), Mm(*y), Mm(margin_right), Mm(*y), COLOR_GRAY, 0.5);
+        *y -= 8.0;
+
+        // Page number footer
+        let page_str = format!("Page {}", page);
+        add_text(layer, &font, &page_str, Mm(185.0), Mm(footer_y), 8.0, COLOR_GRAY);
+
+        // Disclaimer footer
+        add_text(
+            layer, &font,
+            "For informational purposes only. Not a substitute for professional medical advice.",
+            Mm(margin_left), Mm(footer_y), 8.0, COLOR_GRAY,
+        );
+    };
+
+    // Render header on first page
+    render_header(&current_page, &mut y, page_num);
+
+    // Render each medication type group
+    for med_type in &type_keys {
+        let group = &grouped[med_type];
+
+        // Estimate space needed for section header
+        let section_header_space: f32 = 12.0;
+        if y - section_header_space < min_y {
+            // New page
+            page_num += 1;
+            let (new_page, new_layer) = doc.add_page(Mm(215.9), Mm(279.4), "Layer 1");
+            current_page = doc.get_page(new_page).get_layer(new_layer);
+            render_header(&current_page, &mut y, page_num);
+        }
+
+        // Section header
+        add_text(&current_page, &font_bold, med_type.display_name(), Mm(margin_left), Mm(y), 14.0, COLOR_MED_TITLE);
+        y -= 2.0;
+        add_line(&current_page, Mm(margin_left), Mm(y), Mm(margin_right), Mm(y), COLOR_MED_TITLE, 0.3);
+        y -= 6.0;
+
+        for (med_idx, med) in group.iter().enumerate() {
+            // Estimate space for this medication (~25mm with all fields)
+            let mut est_lines: f32 = 3.0; // name + dosage line + divider
+            if med.instructions.is_some() { est_lines += 1.0; }
+            if med.med_type == MedType::Prescription {
+                if med.prescribing_doctor.is_some() || med.start_date.is_some() { est_lines += 1.0; }
+                if med.pharmacy.is_some() || med.rx_number.is_some() { est_lines += 1.0; }
+            }
+            if include_notes && med.notes.is_some() { est_lines += 1.0; }
+            if !med.is_active { est_lines += 1.0; }
+            let est_space = est_lines * 5.0 + 5.0;
+
+            if y - est_space < min_y {
+                // New page
+                page_num += 1;
+                let (new_page, new_layer) = doc.add_page(Mm(215.9), Mm(279.4), "Layer 1");
+                current_page = doc.get_page(new_page).get_layer(new_layer);
+                render_header(&current_page, &mut y, page_num);
+            }
+
+            // Medication name
+            let name_label = if !med.is_active {
+                format!("{} (INACTIVE)", med.name)
+            } else {
+                med.name.clone()
+            };
+            add_text(&current_page, &font_bold, &name_label, Mm(margin_left + 2.0), Mm(y), 12.0, COLOR_BLACK);
+            y -= 5.0;
+
+            // Dosage + frequency line
+            let freq_str = med.frequency.as_deref().unwrap_or("as needed");
+            let dosage_line = format!(
+                "{} {} — {}",
+                format_dosage_amount(med.dosage_amount),
+                med.dosage_unit.display_name(),
+                freq_str,
+            );
+            add_text(&current_page, &font, &dosage_line, Mm(margin_left + 4.0), Mm(y), 10.0, COLOR_BLACK);
+            y -= 5.0;
+
+            // Instructions
+            if let Some(ref instructions) = med.instructions {
+                let instr_line = format!("Instructions: {}", instructions);
+                let truncated = if instr_line.len() > 120 { format!("{}...", &instr_line[..117]) } else { instr_line };
+                add_text(&current_page, &font, &truncated, Mm(margin_left + 4.0), Mm(y), 10.0, COLOR_BLACK);
+                y -= 5.0;
+            }
+
+            // Prescription-specific fields
+            if med.med_type == MedType::Prescription {
+                let mut rx_parts: Vec<String> = Vec::new();
+                if let Some(ref doctor) = med.prescribing_doctor {
+                    rx_parts.push(format!("Prescribed by {}", doctor));
+                }
+                if let Some(ref start) = med.start_date {
+                    rx_parts.push(format!("Started {}", start));
+                }
+                if !rx_parts.is_empty() {
+                    add_text(&current_page, &font, &rx_parts.join(" | "), Mm(margin_left + 4.0), Mm(y), 9.0, COLOR_GRAY);
+                    y -= 4.5;
+                }
+
+                let mut rx_detail: Vec<String> = Vec::new();
+                if let Some(ref pharmacy) = med.pharmacy {
+                    rx_detail.push(format!("Pharmacy: {}", pharmacy));
+                }
+                if let Some(ref rx_num) = med.rx_number {
+                    rx_detail.push(format!("Rx# {}", rx_num));
+                }
+                if let Some(refills) = med.refills_remaining {
+                    rx_detail.push(format!("Refills: {}", refills));
+                }
+                if !rx_detail.is_empty() {
+                    add_text(&current_page, &font, &rx_detail.join(" | "), Mm(margin_left + 4.0), Mm(y), 9.0, COLOR_GRAY);
+                    y -= 4.5;
+                }
+            }
+
+            // Inactive reason
+            if !med.is_active {
+                if let Some(ref reason) = med.discontinue_reason {
+                    let reason_line = format!("Discontinued: {}", reason);
+                    add_text(&current_page, &font, &reason_line, Mm(margin_left + 4.0), Mm(y), 9.0, COLOR_GRAY);
+                    y -= 4.5;
+                }
+                if let Some(ref end) = med.end_date {
+                    let end_line = format!("End date: {}", end);
+                    add_text(&current_page, &font, &end_line, Mm(margin_left + 4.0), Mm(y), 9.0, COLOR_GRAY);
+                    y -= 4.5;
+                }
+            }
+
+            // Notes
+            if include_notes {
+                if let Some(ref notes) = med.notes {
+                    let notes_line = format!("Notes: {}", notes);
+                    let truncated = if notes_line.len() > 120 { format!("{}...", &notes_line[..117]) } else { notes_line };
+                    add_text(&current_page, &font, &truncated, Mm(margin_left + 4.0), Mm(y), 9.0, COLOR_GRAY);
+                    y -= 4.5;
+                }
+            }
+
+            // Light divider between meds (not after last in group)
+            if med_idx < group.len() - 1 {
+                y -= 1.0;
+                add_line(&current_page, Mm(margin_left + 2.0), Mm(y), Mm(margin_right - 10.0), Mm(y), COLOR_LIGHT_GRAY, 0.2);
+                y -= 4.0;
+            } else {
+                y -= 3.0;
+            }
+        }
+
+        // Extra space before next section
+        y -= 5.0;
+    }
+
+    // Save PDF
+    let path = Path::new(output_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = File::create(path).map_err(|e| e.to_string())?;
+    let writer = BufWriter::new(file);
+    doc.save(&mut std::io::BufWriter::new(writer)).map_err(|e| e.to_string())?;
+
+    let status = if active_only { "active" } else { "all" };
+    Ok(GenerateMedicationsReportResponse {
+        success: true,
+        file_path: output_path.to_string(),
+        medication_count,
+        message: format!("Medication list ({} {}) saved to {}", medication_count, status, output_path),
+    })
+}
+
+/// Format dosage amount: show as integer if whole number, otherwise 1 decimal
+fn format_dosage_amount(amount: f64) -> String {
+    if (amount - amount.round()).abs() < 0.001 {
+        format!("{:.0}", amount)
+    } else {
+        format!("{:.1}", amount)
+    }
 }

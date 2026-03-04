@@ -513,6 +513,26 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - **Files Modified**:
   - `src/tools/food_items.rs` - Updated model ID in `get_fuzzy_suggestion`
 
+### Phase 26: Medication List PDF Report
+- **Purpose**: Generate a professional PDF medication list grouped by type, filling the last gap in UHM's report toolset
+- **New Tool**: `generate_medications_report`
+  - Input: patient_name, optional output_path, active_only (default true), include_notes (default true)
+  - Output: PDF saved to `C:\Users\rober\Downloads\Medication_List_{name}_{date}.pdf`
+  - Returns: success, file_path, medication_count, message
+- **PDF Layout**:
+  - Portrait letter-size (215.9mm x 279.4mm), auto-paginating
+  - Header on every page: "Medication List" (blue), patient name, DOB, generated date, active/all filter status
+  - Medications grouped by MedType, sorted by sort_order() (Prescription > Supplement > OTC > Natural > Compound > Medical Device > Other)
+  - Per medication: name (12pt bold), dosage + frequency, instructions, prescription details (doctor, pharmacy, Rx#, refills), discontinue reason for inactive meds
+  - Notes displayed conditionally based on include_notes parameter
+  - Light dividers between medications, blue underlined section headers
+  - Footer: disclaimer text + page number on every page
+- **Response Struct**: `GenerateMedicationsReportResponse` with success, file_path, medication_count, message
+- **Color**: `COLOR_MED_TITLE` = (0, 112, 192) -- blue for medication headers
+- **Files Modified**:
+  - `src/tools/reports.rs` - generate_medications_report(), GenerateMedicationsReportResponse, COLOR_MED_TITLE, format_dosage_amount()
+  - `src/mcp/server.rs` - GenerateMedicationsReportParams, tool handler, updated server instructions
+
 ## Technology Stack
 
 ### Rust
@@ -688,7 +708,7 @@ D:\Projects\UHM\
 │   │   ├── medications.rs  # Medication tool functions
 │   │   ├── vitals.rs       # Vital tool functions + stats
 │   │   ├── exercise.rs     # Exercise tool functions + stats
-│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Exercise, Day Summary)
+│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Exercise, Day Summary, Medications)
 │   ├── nutrition/
 │   │   ├── mod.rs
 │   │   ├── units.rs        # Unit types, categories, conversion constants

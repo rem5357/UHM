@@ -843,6 +843,20 @@ pub struct GenerateExerciseReportParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GenerateMedicationsReportParams {
+    /// Patient name to display on the report
+    pub patient_name: String,
+    /// Full path for PDF output. Defaults to Downloads with auto-generated name.
+    pub output_path: Option<String>,
+    /// Only include active medications (default: true)
+    #[serde(default = "default_true")]
+    pub active_only: bool,
+    /// Include medication notes in report (default: true)
+    #[serde(default = "default_true")]
+    pub include_notes: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GenerateDaySummaryParams {
     /// Date in ISO format: YYYY-MM-DD
     pub date: String,
@@ -2036,6 +2050,24 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Generate a Medication List PDF report grouped by type (Prescription, Supplement, OTC, etc.) with dosage, frequency, prescriber, pharmacy, and notes. Portrait letter-size, auto-paginating.")]
+    fn generate_medications_report(&self, Parameters(p): Parameters<GenerateMedicationsReportParams>) -> Result<CallToolResult, McpError> {
+        let now = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let safe_name = p.patient_name.replace(' ', "_");
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\Medication_List_{}_{}.pdf", safe_name, now)
+        });
+        let result = reports::generate_medications_report(
+            &self.database,
+            &p.patient_name,
+            &output_path,
+            p.active_only,
+            p.include_notes,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Generate a detailed markdown summary of a day's meals, exercise, and nutrition. Includes ingredient-level breakdowns, exercise metrics, BP recovery data, and status against daily targets. Saves report to Downloads folder.")]
     fn generate_day_summary(&self, Parameters(p): Parameters<GenerateDaySummaryParams>) -> Result<CallToolResult, McpError> {
         let output_path = p.output_path.unwrap_or_else(|| {
@@ -2088,7 +2120,7 @@ impl ServerHandler for UhmService {
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
                  Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats, recalculate_exercise_calories. \
                  Exercise calculates calories burned using current weight, speed, incline, and ACSM MET formula. Link PRE/POST vital groups for recovery tracking. \
-                 Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report. \
+                 Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report, generate_medications_report. \
                  PDF reports include patient header, summary stats, color-coded daily tables, and trend charts. \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),
