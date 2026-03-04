@@ -533,6 +533,52 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
   - `src/tools/reports.rs` - generate_medications_report(), GenerateMedicationsReportResponse, COLOR_MED_TITLE, format_dosage_amount()
   - `src/mcp/server.rs` - GenerateMedicationsReportParams, tool handler, updated server instructions
 
+### Phase 28: FTS5 Search Fix, Verified Food Pipeline, Source Tracking & Audit
+- **Purpose**: Fix cross-column FTS5 search, add food item provenance tracking, verified creation pipeline, and audit tool
+- **Problems Solved**:
+  1. **FTS5 cross-column bug**: "Willa's oat milk" failed because FTS5 indexed `name` and `brand` as separate columns — query couldn't match across both
+  2. **The Bacon Incident**: Food items from AI estimates had no source tracking — raw bacon sodium (1720mg/100g) stored as cooked, inflating sodium by ~1000mg/day for 12+ days undetected
+- **Database Schema** (Migration v10):
+  - Added `source TEXT` and `source_detail TEXT` columns to `food_items` (nullable, NULL = legacy)
+  - Rebuilt FTS5 with single unified `search_text` column: `COALESCE(brand, '') || ' ' || name`
+  - Recreated FTS5 sync triggers using concatenated search_text
+- **FTS5 Search Fix**:
+  - Changed FTS5 query from OR semantics to implicit AND (space-separated prefix terms)
+  - Added concatenated LIKE fallback: `COALESCE(brand, '') || ' ' || name LIKE ?`
+  - Cross-column queries like "Willa's oat milk" now work correctly
+- **Source Tracking**:
+  - `source` field: "label_photo", "usda", "estimate", or NULL (legacy)
+  - `source_detail` field: free-text provenance (USDA FDC ID, estimation notes, etc.)
+  - Fully backward-compatible — existing `add_food_item` calls work without source fields
+- **New Tool: `audit_food_items`**:
+  - Filters: "all", "estimates_only", "no_source", "high_usage"
+  - Returns items with usage counts (from meal_entries + recipe_ingredients)
+  - Summary stats: total, estimates count, no_source count, label_verified, usda_verified
+  - Sortable by usage_count, name, or calories
+- **New Tool: `add_food_item_verified`**:
+  - Tiered source resolution: label photo (Sonnet vision) → USDA FoodData Central → AI estimate with 80% rule
+  - Automatic unit normalization: solids→per 100g, liquids→per 100ml
+  - Local sanity checks (no expensive API calls):
+    - Macro math: |actual - (P×4 + C×4 + F×9)| > 15% flags review
+    - Sodium: >1000mg/100g flags review (raw vs cooked detection)
+    - Cross-reference: >50% deviation from similar DB items flags review
+  - Returns "created" with food_item_id or "review_needed" with flags and suggestions
+- **New Module: `ai_client.rs`** — Shared Anthropic API client (Sonnet/Haiku) with text + image support
+- **New Module: `usda_client.rs`** — USDA FoodData Central API client (optional, requires USDA_API_KEY env var)
+- **New Module: `verified.rs`** — Complete verified food item pipeline
+- **Refactored**: `get_fuzzy_suggestion` now uses shared `AnthropicClient` instead of inline HTTP code
+- **Files Modified**:
+  - `src/db/migrations.rs` - Migration v10
+  - `src/models/food_item.rs` - source fields, FTS5 AND semantics, concatenated LIKE
+  - `src/tools/food_items.rs` - source fields, audit_food_items, refactored fuzzy suggestion
+  - `src/tools/mod.rs` - New module declarations
+  - `src/mcp/server.rs` - source fields on params, add_food_item_verified + audit_food_items handlers
+  - `Cargo.toml` - Added urlencoding dependency
+- **New Files**:
+  - `src/tools/ai_client.rs` - Shared Anthropic API client
+  - `src/tools/usda_client.rs` - USDA FoodData Central client
+  - `src/tools/verified.rs` - Verified food item pipeline
+
 ### Phase 27: BP Time-of-Day Chart Page
 - **Purpose**: Visualize circadian BP patterns by appending a time-of-day analysis page to the existing BP report
 - **Problem Solved**: Feb 2026 data showed clear pattern (post-exercise afternoon avg ~112/60 vs evening ~148/77) that wasn't visible in daily trend charts
@@ -721,13 +767,16 @@ D:\Projects\UHM\
 │   ├── tools/
 │   │   ├── mod.rs
 │   │   ├── status.rs       # uhm_status implementation + instructions
-│   │   ├── food_items.rs   # Food item tool functions
+│   │   ├── food_items.rs   # Food item tool functions + audit
 │   │   ├── recipes.rs      # Recipe tool functions
 │   │   ├── days.rs         # Day and meal entry tool functions + stats
 │   │   ├── medications.rs  # Medication tool functions
 │   │   ├── vitals.rs       # Vital tool functions + stats
 │   │   ├── exercise.rs     # Exercise tool functions + stats
-│   │   └── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Exercise, Day Summary, Medications)
+│   │   ├── reports.rs      # PDF/markdown report generation (BP, HR, Weight, Exercise, Day Summary, Medications)
+│   │   ├── ai_client.rs    # Shared Anthropic API client (Sonnet/Haiku)
+│   │   ├── usda_client.rs  # USDA FoodData Central API client
+│   │   └── verified.rs     # Verified food item creation pipeline
 │   ├── nutrition/
 │   │   ├── mod.rs
 │   │   ├── units.rs        # Unit types, categories, conversion constants
@@ -752,7 +801,7 @@ D:\Projects\UHM\
 - [ ] Unit conversion utilities (grams ↔ oz, ml ↔ cups, etc.)
 - [ ] Nutrition goals and daily targets
 - [ ] Weekly/monthly nutrition reports
-- [ ] Food item import from external databases (USDA, etc.)
+- [x] Food item import from external databases (USDA) — Phase 28: USDA FoodData Central integrated into verified pipeline
 
 ### Potential Enhancements
 - [ ] Barcode scanning integration

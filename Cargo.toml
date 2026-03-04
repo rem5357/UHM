@@ -61,6 +61,9 @@ reqwest = { version = "0.11", features = ["blocking", "json"] }
 # CSV parsing
 csv = "1"
 
+# URL encoding for USDA API
+urlencoding = "2"
+
 [dev-dependencies]
 tempfile = "3"
 

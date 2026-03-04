@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -73,6 +73,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 9 {
         migrate_v9(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (9)", [])?;
+    }
+
+    if current_version < 10 {
+        migrate_v10(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
     }
 
     Ok(())
@@ -642,6 +647,67 @@ fn migrate_v9(conn: &Connection) -> DbResult<()> {
             VALUES('delete', old.id, old.name, COALESCE(old.brand, ''));
             INSERT INTO food_items_fts(rowid, name, brand)
             VALUES (new.id, new.name, COALESCE(new.brand, ''));
+        END;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v10: Source tracking columns + FTS5 rebuild with unified search_text
+fn migrate_v10(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- SOURCE TRACKING
+        -- Track provenance of food item nutritional data
+        -- ============================================
+        ALTER TABLE food_items ADD COLUMN source TEXT;
+        ALTER TABLE food_items ADD COLUMN source_detail TEXT;
+
+        -- ============================================
+        -- FTS5 REBUILD: Unified search_text column
+        -- Fixes cross-column queries like "Willa's oat milk"
+        -- (brand="Willa's" + name="Oat Milk Barista")
+        -- ============================================
+
+        -- Drop existing triggers
+        DROP TRIGGER IF EXISTS food_items_fts_ai;
+        DROP TRIGGER IF EXISTS food_items_fts_ad;
+        DROP TRIGGER IF EXISTS food_items_fts_au;
+
+        -- Drop existing FTS table
+        DROP TABLE IF EXISTS food_items_fts;
+
+        -- Recreate with single search_text column
+        CREATE VIRTUAL TABLE food_items_fts USING fts5(
+            search_text,
+            content='food_items',
+            content_rowid='id'
+        );
+
+        -- Populate from existing data
+        INSERT INTO food_items_fts(rowid, search_text)
+        SELECT id, COALESCE(brand, '') || ' ' || name FROM food_items;
+
+        -- Trigger: keep FTS in sync on INSERT
+        CREATE TRIGGER food_items_fts_ai AFTER INSERT ON food_items BEGIN
+            INSERT INTO food_items_fts(rowid, search_text)
+            VALUES (new.id, COALESCE(new.brand, '') || ' ' || new.name);
+        END;
+
+        -- Trigger: keep FTS in sync on DELETE
+        CREATE TRIGGER food_items_fts_ad AFTER DELETE ON food_items BEGIN
+            INSERT INTO food_items_fts(food_items_fts, rowid, search_text)
+            VALUES('delete', old.id, COALESCE(old.brand, '') || ' ' || old.name);
+        END;
+
+        -- Trigger: keep FTS in sync on UPDATE
+        CREATE TRIGGER food_items_fts_au AFTER UPDATE ON food_items BEGIN
+            INSERT INTO food_items_fts(food_items_fts, rowid, search_text)
+            VALUES('delete', old.id, COALESCE(old.brand, '') || ' ' || old.name);
+            INSERT INTO food_items_fts(rowid, search_text)
+            VALUES (new.id, COALESCE(new.brand, '') || ' ' || new.name);
         END;
         "#,
     )?;

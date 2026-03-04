@@ -2,6 +2,7 @@
 //!
 //! Tools for managing food items in the database.
 
+use rusqlite::params;
 use serde::Serialize;
 
 use crate::db::Database;
@@ -75,6 +76,10 @@ pub struct FoodItemDetail {
     pub grams_per_serving: Option<f64>,
     /// Milliliters per serving (for unit conversion calculations)
     pub ml_per_serving: Option<f64>,
+    /// Source of nutritional data (label_photo, usda, estimate, or null for legacy)
+    pub source: Option<String>,
+    /// Free-text provenance details
+    pub source_detail: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub recipe_usage_count: i64,
@@ -111,6 +116,8 @@ impl FoodItemDetail {
             base_unit_type: item.base_unit_type,
             grams_per_serving: item.grams_per_serving,
             ml_per_serving: item.ml_per_serving,
+            source: item.source,
+            source_detail: item.source_detail,
             created_at: item.created_at,
             updated_at: item.updated_at,
             recipe_usage_count,
@@ -663,6 +670,8 @@ pub struct FoodItemFullSummary {
     pub saturated_fat: f64,
     pub cholesterol: f64,
     pub preference: Preference,
+    pub source: Option<String>,
+    pub source_detail: Option<String>,
 }
 
 impl From<&FoodItem> for FoodItemFullSummary {
@@ -686,6 +695,8 @@ impl From<&FoodItem> for FoodItemFullSummary {
             saturated_fat: item.nutrition.saturated_fat,
             cholesterol: item.nutrition.cholesterol,
             preference: item.preference,
+            source: item.source.clone(),
+            source_detail: item.source_detail.clone(),
         }
     }
 }
@@ -778,12 +789,11 @@ struct FoodItemForFuzzy {
 /// This calls Claude Haiku to suggest the closest matching food name
 /// from the database when the user's query doesn't match exactly.
 fn get_fuzzy_suggestion(conn: &rusqlite::Connection, query: &str) -> Result<Option<String>, String> {
-    use std::env;
+    use super::ai_client::{AnthropicClient, ContentBlock};
 
-    // Get API key from environment
-    let api_key = match env::var("ANTHROPIC_API_KEY") {
-        Ok(key) => key,
-        Err(_) => return Ok(None), // No API key, skip fuzzy matching
+    let client = match AnthropicClient::new() {
+        Some(c) => c,
+        None => return Ok(None), // No API key, skip fuzzy matching
     };
 
     // Get all food items with brand info for context
@@ -815,7 +825,6 @@ fn get_fuzzy_suggestion(conn: &rusqlite::Connection, query: &str) -> Result<Opti
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Build the Haiku request with improved prompt
     let prompt = format!(
         "User searched for: \"{}\"\n\n\
          Available food items (format: \"Brand - Name\" or just \"Name\"):\n{}\n\n\
@@ -827,39 +836,7 @@ fn get_fuzzy_suggestion(conn: &rusqlite::Connection, query: &str) -> Result<Opti
         query, names_list
     );
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&serde_json::json!({
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": prompt
-            }]
-        }))
-        .send()
-        .map_err(|e| format!("Haiku API request failed: {}", e))?;
-
-    if !response.status().is_success() {
-        return Ok(None);
-    }
-
-    let body: serde_json::Value = response
-        .json()
-        .map_err(|e| format!("Failed to parse Haiku response: {}", e))?;
-
-    // Extract the suggestion from the response
-    let response_text = body["content"][0]["text"]
-        .as_str()
-        .map(|s| s.trim().to_string());
+    let response_text = client.call_haiku("", &[ContentBlock::Text(prompt)], 100).ok();
 
     let suggestion = response_text.and_then(|text| {
         if text == "NONE" || text.is_empty() {
@@ -894,6 +871,146 @@ fn get_fuzzy_suggestion(conn: &rusqlite::Connection, query: &str) -> Result<Opti
     });
 
     Ok(suggestion)
+}
+
+// ============================================================================
+// Audit
+// ============================================================================
+
+/// Summary stats for the audit
+#[derive(Debug, Serialize)]
+pub struct AuditSummary {
+    pub total_items: i64,
+    pub estimates_count: i64,
+    pub no_source_count: i64,
+    pub label_verified_count: i64,
+    pub usda_verified_count: i64,
+}
+
+/// Single item in the audit results
+#[derive(Debug, Serialize)]
+pub struct AuditFoodItem {
+    pub id: i64,
+    pub name: String,
+    pub brand: Option<String>,
+    pub source: Option<String>,
+    pub source_detail: Option<String>,
+    pub usage_count: i64,
+    pub calories: f64,
+    pub sodium: f64,
+}
+
+/// Response for audit_food_items
+#[derive(Debug, Serialize)]
+pub struct AuditFoodItemsResponse {
+    pub summary: AuditSummary,
+    pub items: Vec<AuditFoodItem>,
+    pub count: usize,
+}
+
+/// Audit food items for source tracking and data quality
+///
+/// Filters: "all", "estimates_only", "no_source", "high_usage"
+/// Sort: "name", "usage", "sodium", "calories"
+pub fn audit_food_items(
+    db: &Database,
+    filter: &str,
+    min_usage_count: i64,
+    sort_by: &str,
+    limit: i64,
+) -> Result<AuditFoodItemsResponse, String> {
+    let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
+    let limit = limit.min(500).max(1);
+
+    // Build WHERE clause based on filter
+    let where_clause = match filter {
+        "estimates_only" => "WHERE f.source = 'estimate'",
+        "no_source" => "WHERE f.source IS NULL",
+        "label_verified" => "WHERE f.source = 'label_photo'",
+        "usda_verified" => "WHERE f.source = 'usda'",
+        "high_usage" => "", // filtered by HAVING below
+        _ => "", // "all"
+    };
+
+    let having_clause = if filter == "high_usage" || min_usage_count > 0 {
+        format!("HAVING usage_count >= {}", if min_usage_count > 0 { min_usage_count } else { 5 })
+    } else {
+        String::new()
+    };
+
+    let order_clause = match sort_by {
+        "usage" => "ORDER BY usage_count DESC, f.name ASC",
+        "sodium" => "ORDER BY f.sodium DESC, f.name ASC",
+        "calories" => "ORDER BY f.calories DESC, f.name ASC",
+        _ => "ORDER BY f.name ASC",
+    };
+
+    let sql = format!(
+        r#"
+        SELECT
+            f.id, f.name, f.brand, f.source, f.source_detail,
+            f.calories, f.sodium,
+            (SELECT COUNT(*) FROM recipe_ingredients ri WHERE ri.food_item_id = f.id)
+            + (SELECT COUNT(*) FROM meal_entries me WHERE me.food_item_id = f.id) AS usage_count
+        FROM food_items f
+        {}
+        GROUP BY f.id
+        {}
+        {}
+        LIMIT ?1
+        "#,
+        where_clause, having_clause, order_clause
+    );
+
+    let mut stmt = conn.prepare(&sql)
+        .map_err(|e| format!("Failed to prepare audit query: {}", e))?;
+
+    let items: Vec<AuditFoodItem> = stmt
+        .query_map(params![limit], |row| {
+            Ok(AuditFoodItem {
+                id: row.get("id")?,
+                name: row.get("name")?,
+                brand: row.get("brand")?,
+                source: row.get("source")?,
+                source_detail: row.get("source_detail")?,
+                usage_count: row.get("usage_count")?,
+                calories: row.get("calories")?,
+                sodium: row.get("sodium")?,
+            })
+        })
+        .map_err(|e| format!("Failed to execute audit query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect audit results: {}", e))?;
+
+    // Get summary stats
+    let total_items: i64 = conn.query_row("SELECT COUNT(*) FROM food_items", [], |row| row.get(0))
+        .map_err(|e| format!("Failed to count items: {}", e))?;
+    let estimates_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM food_items WHERE source = 'estimate'", [], |row| row.get(0)
+    ).map_err(|e| format!("Failed to count estimates: {}", e))?;
+    let no_source_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM food_items WHERE source IS NULL", [], |row| row.get(0)
+    ).map_err(|e| format!("Failed to count no_source: {}", e))?;
+    let label_verified_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM food_items WHERE source = 'label_photo'", [], |row| row.get(0)
+    ).map_err(|e| format!("Failed to count label_verified: {}", e))?;
+    let usda_verified_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM food_items WHERE source = 'usda'", [], |row| row.get(0)
+    ).map_err(|e| format!("Failed to count usda_verified: {}", e))?;
+
+    let count = items.len();
+
+    Ok(AuditFoodItemsResponse {
+        summary: AuditSummary {
+            total_items,
+            estimates_count,
+            no_source_count,
+            label_verified_count,
+            usda_verified_count,
+        },
+        items,
+        count,
+    })
 }
 
 /// Delete a food item (blocked if used in any recipe or meal entry)

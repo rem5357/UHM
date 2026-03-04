@@ -29,6 +29,7 @@ use crate::tools::medications;
 use crate::tools::recipes;
 use crate::tools::reports;
 use crate::tools::status::StatusTracker;
+use crate::tools::verified;
 use crate::tools::vitals;
 
 /// Batch update state for efficient bulk food item updates
@@ -108,6 +109,10 @@ pub struct AddFoodItemParams {
     #[serde(default)]
     pub preference: Option<String>,
     pub notes: Option<String>,
+    /// Source of nutritional data: "label_photo", "usda", "estimate" (optional)
+    pub source: Option<String>,
+    /// Free-text provenance details (optional)
+    pub source_detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -159,6 +164,10 @@ pub struct UpdateFoodItemParams {
     pub cholesterol: Option<f64>,
     pub preference: Option<String>,
     pub notes: Option<String>,
+    /// Update source of nutritional data
+    pub source: Option<String>,
+    /// Update provenance details
+    pub source_detail: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -453,6 +462,38 @@ pub struct SearchFoodItemsBatchParams {
 }
 
 fn default_batch_limit() -> i64 { 5 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AuditFoodItemsParams {
+    /// Filter: "all", "estimates_only", "no_source", "label_verified", "usda_verified", "high_usage"
+    #[serde(default = "default_audit_filter")]
+    pub filter: String,
+    /// Minimum usage count to include (default 0)
+    #[serde(default)]
+    pub min_usage_count: i64,
+    /// Sort by: "name", "usage", "sodium", "calories" (default "name")
+    #[serde(default = "default_audit_sort")]
+    pub sort_by: String,
+    /// Maximum results (default 100)
+    #[serde(default = "default_audit_limit")]
+    pub limit: i64,
+}
+
+fn default_audit_filter() -> String { "all".to_string() }
+fn default_audit_sort() -> String { "name".to_string() }
+fn default_audit_limit() -> i64 { 100 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddFoodItemVerifiedParams {
+    /// Description of the food item (e.g., "A&W Root Beer, 12 oz can")
+    pub description: String,
+    /// Base64-encoded label photo for vision extraction (optional)
+    pub image_base64: Option<String>,
+    /// Category hint: "solid", "liquid", "countable" (optional)
+    pub category: Option<String>,
+    /// Brand hint (optional)
+    pub brand: Option<String>,
+}
 
 /// Single item for batch meal logging
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1030,6 +1071,7 @@ impl UhmService {
             cholesterol: p.cholesterol, preference: p.preference.as_deref().map(Preference::from_str).unwrap_or_default(),
             notes: p.notes,
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
+            source: p.source, source_detail: p.source_detail,
         };
         let result = food_items::add_food_item(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1077,6 +1119,7 @@ impl UhmService {
             fiber: p.fiber, sodium: p.sodium, sugar: p.sugar, saturated_fat: p.saturated_fat,
             cholesterol: p.cholesterol, preference: p.preference.map(|s| Preference::from_str(&s)), notes: p.notes,
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
+            source: p.source, source_detail: p.source_detail,
         };
 
         // Check if batch mode is active
@@ -1553,6 +1596,40 @@ impl UhmService {
     fn list_unused_food_items(&self) -> Result<CallToolResult, McpError> {
         let result = food_items::list_unused_food_items(&self.database).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Audit food items for data quality and source tracking. Shows which items have verified sources (label photos, USDA) vs estimates or no source. Filters: 'all', 'estimates_only', 'no_source', 'label_verified', 'usda_verified', 'high_usage'. Sort by: 'name', 'usage', 'sodium', 'calories'.")]
+    fn audit_food_items(&self, Parameters(p): Parameters<AuditFoodItemsParams>) -> Result<CallToolResult, McpError> {
+        let result = food_items::audit_food_items(&self.database, &p.filter, p.min_usage_count, &p.sort_by, p.limit)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Create a verified food item with source tracking and sanity checks. Tiered resolution: (1) label photo via Sonnet vision, (2) USDA FoodData Central lookup, (3) AI estimate with 80% rule. Runs sanity checks: macro math, sodium thresholds, cross-reference against existing items. Returns 'created' with item ID or 'review_needed' with flags and suggestions.")]
+    async fn add_food_item_verified(&self, Parameters(p): Parameters<AddFoodItemVerifiedParams>) -> Result<CallToolResult, McpError> {
+        let db = self.database.clone();
+        let description = p.description;
+        let image_base64 = p.image_base64;
+        let category = p.category;
+        let brand = p.brand;
+
+        let result = tokio::task::spawn_blocking(move || {
+            verified::run_verified_pipeline(
+                &db,
+                &description,
+                image_base64.as_deref(),
+                category.as_deref(),
+                brand.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task join error: {}", e), None))?
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
@@ -2122,6 +2199,8 @@ impl ServerHandler for UhmService {
                  Exercise calculates calories burned using current weight, speed, incline, and ACSM MET formula. Link PRE/POST vital groups for recovery tracking. \
                  Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report, generate_medications_report. \
                  PDF reports include patient header, summary stats, color-coded daily tables, and trend charts. \
+                 Verified: add_food_item_verified (creates food items with source tracking and sanity checks — label photo, USDA, or AI estimate). \
+                 Audit: audit_food_items (data quality review — shows source tracking stats, filters by source type/usage). \
                  Cleanup: list_unused_food_items, list_unused_recipes, list_orphaned_days, delete_day."
                     .into(),
             ),

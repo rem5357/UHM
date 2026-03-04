@@ -54,6 +54,10 @@ pub struct FoodItem {
     pub grams_per_serving: Option<f64>,
     /// Milliliters per serving (for volume-based items)
     pub ml_per_serving: Option<f64>,
+    /// Source of nutritional data: "label_photo", "usda", "estimate", or NULL for legacy
+    pub source: Option<String>,
+    /// Free-text provenance details (USDA FDC ID, photo description, etc.)
+    pub source_detail: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -88,6 +92,10 @@ pub struct FoodItemCreate {
     pub grams_per_serving: Option<f64>,
     /// Override auto-calculated ml per serving
     pub ml_per_serving: Option<f64>,
+    /// Source of nutritional data
+    pub source: Option<String>,
+    /// Free-text provenance details
+    pub source_detail: Option<String>,
 }
 
 /// Data for updating a food item
@@ -114,6 +122,10 @@ pub struct FoodItemUpdate {
     pub grams_per_serving: Option<f64>,
     /// Override ml per serving
     pub ml_per_serving: Option<f64>,
+    /// Update source of nutritional data
+    pub source: Option<String>,
+    /// Update provenance details
+    pub source_detail: Option<String>,
 }
 
 impl FoodItem {
@@ -146,6 +158,8 @@ impl FoodItem {
             base_unit_type,
             grams_per_serving: row.get("grams_per_serving")?,
             ml_per_serving: row.get("ml_per_serving")?,
+            source: row.get("source")?,
+            source_detail: row.get("source_detail")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -173,8 +187,9 @@ impl FoodItem {
             INSERT INTO food_items (
                 name, brand, serving_size, serving_unit,
                 calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol,
-                preference, notes, base_unit_type, grams_per_serving, ml_per_serving
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                preference, notes, base_unit_type, grams_per_serving, ml_per_serving,
+                source, source_detail
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
             "#,
             params![
                 data.name,
@@ -195,6 +210,8 @@ impl FoodItem {
                 base_unit_type.to_db_str(),
                 grams_per_serving,
                 ml_per_serving,
+                data.source,
+                data.source_detail,
             ],
         )?;
 
@@ -219,12 +236,14 @@ impl FoodItem {
     }
 
     /// Search food items by name or brand (LIKE pattern matching)
+    /// Also tries concatenated "brand name" for cross-column matching
     pub fn search(conn: &Connection, query: &str, limit: i64) -> DbResult<Vec<Self>> {
         let search_pattern = format!("%{}%", query);
         let mut stmt = conn.prepare(
             r#"
             SELECT * FROM food_items
             WHERE name LIKE ?1 OR brand LIKE ?1
+                OR (COALESCE(brand, '') || ' ' || name) LIKE ?1
             ORDER BY name ASC
             LIMIT ?2
             "#
@@ -239,7 +258,9 @@ impl FoodItem {
 
     /// Search food items using FTS5 full-text search
     ///
-    /// Tokenizes the query and searches for any word match in name or brand.
+    /// Tokenizes the query and searches for ALL words across the unified search_text column.
+    /// The search_text column contains "brand name" concatenated, so cross-column queries
+    /// like "Willa's oat milk" match naturally.
     /// Returns items ordered by FTS5 rank (relevance).
     pub fn search_fts(conn: &Connection, query: &str, limit: i64) -> DbResult<Vec<Self>> {
         // Build FTS5 query: split into words, add prefix matching
@@ -248,12 +269,13 @@ impl FoodItem {
             return Ok(Vec::new());
         }
 
-        // Create FTS5 query with prefix matching: "word1* OR word2*"
+        // Create FTS5 query with prefix matching and implicit AND: "word1* word2*"
+        // Space-separated prefix terms in FTS5 = all must match
         let fts_query = words
             .iter()
             .map(|w| format!("{}*", w.replace('\'', "''"))) // Escape single quotes
             .collect::<Vec<_>>()
-            .join(" OR ");
+            .join(" ");
 
         let sql = r#"
             SELECT f.*
@@ -354,6 +376,8 @@ impl FoodItem {
         add_update!(saturated_fat, "saturated_fat");
         add_update!(cholesterol, "cholesterol");
         add_update!(notes, "notes");
+        add_update!(source, "source");
+        add_update!(source_detail, "source_detail");
 
         if let Some(ref pref) = data.preference {
             updates.push(format!("preference = ?{}", params_vec.len() + 1));
