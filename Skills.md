@@ -1,5 +1,11 @@
 # UHM - Universal Health Manager
 
+**Version:** 1.1.0 | **Build:** 123 | **Updated:** 2026-03-04
+
+## Changelog
+
+- **Build 123** (2026-03-04): Fuzzy search tier — strsim Jaro-Winkler between LIKE and Haiku. `search_method` field on batch results.
+
 ## Project Overview
 
 UHM is a health and nutrition tracking system built as an MCP (Model Context Protocol) server in Rust. It enables AI assistants like Claude to help users track their food intake, recipes, daily meals, and nutritional information through natural conversation.

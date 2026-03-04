@@ -521,6 +521,78 @@ impl FoodItem {
         Ok(ids)
     }
 
+    /// Fuzzy search food items using Jaro-Winkler string similarity
+    ///
+    /// Loads all food items and scores them word-by-word against the query.
+    /// An item matches if at least one query word has J-W score > 0.82 against
+    /// any item word. Overall score = average of best per-query-word scores.
+    /// Returns top `limit` matches sorted by score descending.
+    pub fn search_fuzzy(conn: &Connection, query: &str, limit: i64) -> DbResult<Vec<Self>> {
+        use strsim::jaro_winkler;
+
+        let query_words: Vec<String> = query.split_whitespace()
+            .map(|w| w.to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        if query_words.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Load all food items
+        let all_items = Self::list(conn, None, "name", "asc", 500, 0)?;
+
+        const THRESHOLD: f64 = 0.82;
+
+        let mut scored: Vec<(f64, &FoodItem)> = Vec::new();
+
+        for item in &all_items {
+            // Build word list from brand + name
+            let text = format!(
+                "{} {}",
+                item.brand.as_deref().unwrap_or(""),
+                &item.name
+            ).to_lowercase();
+
+            let item_words: Vec<&str> = text.split_whitespace().collect();
+
+            if item_words.is_empty() {
+                continue;
+            }
+
+            // For each query word, find best J-W score against any item word
+            let mut best_scores: Vec<f64> = Vec::new();
+            let mut has_match = false;
+
+            for qw in &query_words {
+                let best = item_words.iter()
+                    .map(|iw| jaro_winkler(qw, iw) as f64)
+                    .fold(0.0_f64, f64::max);
+
+                if best > THRESHOLD {
+                    has_match = true;
+                }
+                best_scores.push(best);
+            }
+
+            if has_match {
+                let avg_score: f64 = best_scores.iter().sum::<f64>() / best_scores.len() as f64;
+                scored.push((avg_score, item));
+            }
+        }
+
+        // Sort by score descending
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Return top `limit` matches (clone the items)
+        let results: Vec<Self> = scored.into_iter()
+            .take(limit as usize)
+            .map(|(_, item)| item.clone())
+            .collect();
+
+        Ok(results)
+    }
+
     /// Count total food items (optionally filtered by preference)
     pub fn count(conn: &Connection, preference: Option<Preference>) -> DbResult<i64> {
         let count: i64 = if let Some(pref) = preference {

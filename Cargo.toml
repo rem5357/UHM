@@ -64,6 +64,9 @@ csv = "1"
 # URL encoding for USDA API
 urlencoding = "2"
 
+# Fuzzy string matching (Jaro-Winkler)
+strsim = "0.11"
+
 [dev-dependencies]
 tempfile = "3"
 

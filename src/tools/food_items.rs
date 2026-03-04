@@ -707,6 +707,8 @@ pub struct BatchQueryResult {
     pub query: String,
     pub items: Vec<FoodItemFullSummary>,
     pub count: usize,
+    /// Which search tier produced the results: "fts5", "like", "fuzzy", or null
+    pub search_method: Option<String>,
     /// Fuzzy match suggestion if no exact results found (from Haiku API)
     pub fuzzy_suggestion: Option<String>,
 }
@@ -743,20 +745,36 @@ pub fn search_food_items_batch(
     let mut total_items_found = 0;
 
     for query in queries {
-        // Try FTS5 search first (handles word tokenization)
-        let mut items = FoodItem::search_fts(&conn, query, limit).unwrap_or_default();
+        let mut search_method: Option<String> = None;
 
-        // Fall back to LIKE search if FTS5 returns nothing
+        // Tier 1: FTS5 full-text search (handles word tokenization)
+        let mut items = FoodItem::search_fts(&conn, query, limit).unwrap_or_default();
+        if !items.is_empty() {
+            search_method = Some("fts5".to_string());
+        }
+
+        // Tier 2: LIKE fallback
         if items.is_empty() {
             items = FoodItem::search(&conn, query, limit)
                 .map_err(|e| format!("Search failed for '{}': {}", query, e))?;
+            if !items.is_empty() {
+                search_method = Some("like".to_string());
+            }
+        }
+
+        // Tier 3: strsim Jaro-Winkler fuzzy match
+        if items.is_empty() {
+            items = FoodItem::search_fuzzy(&conn, query, limit).unwrap_or_default();
+            if !items.is_empty() {
+                search_method = Some("fuzzy".to_string());
+            }
         }
 
         let summaries: Vec<FoodItemFullSummary> = items.iter().map(FoodItemFullSummary::from).collect();
         let count = summaries.len();
         total_items_found += count;
 
-        // Get fuzzy suggestion if no results and fuzzy_match is enabled
+        // Tier 4: Haiku fuzzy suggestion (semantic matching for synonyms)
         let fuzzy_suggestion = if count == 0 && fuzzy_match {
             get_fuzzy_suggestion(&conn, query).ok().flatten()
         } else {
@@ -767,6 +785,7 @@ pub fn search_food_items_batch(
             query: query.clone(),
             items: summaries,
             count,
+            search_method,
             fuzzy_suggestion,
         });
     }
