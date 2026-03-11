@@ -3392,6 +3392,20 @@ fn assign_med_to_slots(med: &Medication) -> Vec<usize> {
     vec![0]
 }
 
+/// Check if a word appears at a word boundary in text (not as a substring of another word)
+/// e.g., "gel" matches "apply gel daily" but NOT "softgel"
+fn contains_word(text: &str, word: &str) -> bool {
+    for (i, _) in text.match_indices(word) {
+        let before_ok = i == 0 || !text.as_bytes()[i - 1].is_ascii_alphanumeric();
+        let after_idx = i + word.len();
+        let after_ok = after_idx >= text.len() || !text.as_bytes()[after_idx].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// Check if a medication should be excluded from the pill organizer
 fn is_non_pill_med(med: &Medication) -> bool {
     // Exclude non-pill dosage units
@@ -3406,12 +3420,13 @@ fn is_non_pill_med(med: &Medication) -> bool {
         return true;
     }
 
-    // Check instructions/notes for non-pill forms
+    // Check instructions for non-pill forms (word-boundary aware to avoid
+    // false positives like "softgel" matching "gel")
     let non_pill_keywords = ["gel", "cream", "spray", "liquid", "powder", "solution", "topical"];
     if let Some(ref instructions) = med.instructions {
         let instr_lower = instructions.to_lowercase();
         for kw in &non_pill_keywords {
-            if instr_lower.contains(kw) {
+            if contains_word(&instr_lower, kw) {
                 return true;
             }
         }
@@ -3459,22 +3474,22 @@ pub fn generate_pill_organizer_report(
         PillSlot {
             label: "Morning \u{2014} 8:00 AM",
             bg_color: (232, 240, 254),   // #e8f0fe
-            label_color: (21, 101, 192), // #1565c0
+            label_color: (13, 71, 161), // #0d47a1
         },
         PillSlot {
             label: "Midday \u{2014} 3:00 PM",
             bg_color: (255, 243, 205),  // #fff3cd
-            label_color: (230, 81, 0),  // #e65100
+            label_color: (191, 54, 12), // #bf360c
         },
         PillSlot {
             label: "Evening \u{2014} 8:00 PM",
             bg_color: (232, 245, 233),  // #e8f5e9
-            label_color: (46, 125, 50), // #2e7d32
+            label_color: (27, 94, 32), // #1b5e20
         },
         PillSlot {
             label: "Bedtime",
             bg_color: (243, 229, 245),   // #f3e5f5
-            label_color: (106, 27, 154), // #6a1b9a
+            label_color: (74, 20, 140), // #4a148c
         },
     ];
 
@@ -3658,7 +3673,7 @@ pub fn generate_pill_organizer_report(
             13.0,
             slot.label_color,
         );
-        y -= section_bar_h + 1.8;
+        y -= section_bar_h + 5.5;
 
         // Medication rows
         for (i, entry) in entries.iter().enumerate() {
