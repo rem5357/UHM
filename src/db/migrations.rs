@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -78,6 +78,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 10 {
         migrate_v10(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (10)", [])?;
+    }
+
+    if current_version < 11 {
+        migrate_v11(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
     }
 
     Ok(())
@@ -709,6 +714,23 @@ fn migrate_v10(conn: &Connection) -> DbResult<()> {
             INSERT INTO food_items_fts(rowid, search_text)
             VALUES (new.id, COALESCE(new.brand, '') || ' ' || new.name);
         END;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v11: Pill organizer fields for medications
+fn migrate_v11(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- PILL ORGANIZER SUPPORT
+        -- Add physical description and schedule slot
+        -- for pill organizer report generation
+        -- ============================================
+        ALTER TABLE medications ADD COLUMN pill_description TEXT;
+        ALTER TABLE medications ADD COLUMN schedule_slot TEXT;
         "#,
     )?;
 

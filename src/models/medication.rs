@@ -178,6 +178,8 @@ pub struct Medication {
     pub end_date: Option<String>,
     pub discontinue_reason: Option<String>,
     pub notes: Option<String>,
+    pub pill_description: Option<String>,
+    pub schedule_slot: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -198,6 +200,8 @@ pub struct MedicationCreate {
     pub refills_remaining: Option<i32>,
     pub start_date: Option<String>,
     pub notes: Option<String>,
+    pub pill_description: Option<String>,
+    pub schedule_slot: Option<String>,
 }
 
 /// Data for updating a medication (requires force flag)
@@ -216,6 +220,8 @@ pub struct MedicationUpdate {
     pub refills_remaining: Option<i32>,
     pub start_date: Option<String>,
     pub notes: Option<String>,
+    pub pill_description: Option<String>,
+    pub schedule_slot: Option<String>,
 }
 
 /// Data for deprecating a medication
@@ -246,6 +252,8 @@ impl Medication {
             end_date: row.get("end_date")?,
             discontinue_reason: row.get("discontinue_reason")?,
             notes: row.get("notes")?,
+            pill_description: row.get("pill_description")?,
+            schedule_slot: row.get("schedule_slot")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -258,9 +266,10 @@ impl Medication {
             INSERT INTO medications (
                 name, med_type, dosage_amount, dosage_unit,
                 instructions, frequency, prescribing_doctor, prescribed_date,
-                pharmacy, rx_number, refills_remaining, start_date, notes
+                pharmacy, rx_number, refills_remaining, start_date, notes,
+                pill_description, schedule_slot
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 data.name,
@@ -276,6 +285,8 @@ impl Medication {
                 data.refills_remaining,
                 data.start_date,
                 data.notes,
+                data.pill_description,
+                data.schedule_slot,
             ],
         )?;
 
@@ -401,6 +412,14 @@ impl Medication {
         if let Some(ref notes) = data.notes {
             updates.push(format!("notes = ?{}", params_vec.len() + 1));
             params_vec.push(Box::new(notes.clone()));
+        }
+        if let Some(ref pill_description) = data.pill_description {
+            updates.push(format!("pill_description = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(pill_description.clone()));
+        }
+        if let Some(ref schedule_slot) = data.schedule_slot {
+            updates.push(format!("schedule_slot = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(schedule_slot.clone()));
         }
 
         if updates.is_empty() {

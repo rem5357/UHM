@@ -556,6 +556,10 @@ pub struct AddMedicationParams {
     pub start_date: Option<String>,
     /// Notes
     pub notes: Option<String>,
+    /// Physical pill description (e.g., "White, round, scored")
+    pub pill_description: Option<String>,
+    /// Schedule time slot: morning, midday, evening, bedtime, or comma-separated combo, or "all"
+    pub schedule_slot: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -617,6 +621,10 @@ pub struct UpdateMedicationParams {
     pub start_date: Option<String>,
     /// New notes
     pub notes: Option<String>,
+    /// Physical pill description (e.g., "White, round, scored")
+    pub pill_description: Option<String>,
+    /// Schedule time slot: morning, midday, evening, bedtime, or comma-separated combo, or "all"
+    pub schedule_slot: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -895,6 +903,14 @@ pub struct GenerateMedicationsReportParams {
     /// Include medication notes in report (default: true)
     #[serde(default = "default_true")]
     pub include_notes: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GeneratePillOrganizerReportParams {
+    /// Patient name to display on the report header
+    pub patient_name: String,
+    /// Full path for PDF output. Defaults to Downloads with auto-generated name.
+    pub output_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1497,6 +1513,8 @@ impl UhmService {
             refills_remaining: p.refills_remaining,
             start_date: p.start_date,
             notes: p.notes,
+            pill_description: p.pill_description,
+            schedule_slot: p.schedule_slot,
         };
         let result = medications::add_medication(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1545,6 +1563,8 @@ impl UhmService {
             refills_remaining: p.refills_remaining,
             start_date: p.start_date,
             notes: p.notes,
+            pill_description: p.pill_description,
+            schedule_slot: p.schedule_slot,
         };
         let result = medications::update_medication(&self.database, p.id, data, p.force)
             .map_err(|e| McpError::internal_error(e, None))?;
@@ -2145,6 +2165,21 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "Generate a single-page Pill Organizer PDF report for filling weekly pill containers. Shows active medications organized by time-of-day (Morning, Midday, Evening, Bedtime) with color-coded sections. Includes medication name, dosage, type, and physical pill description. Excludes PRN meds and non-pill forms (gels, sprays, liquids, powders). Output defaults to Downloads folder.")]
+    fn generate_pill_organizer_report(&self, Parameters(p): Parameters<GeneratePillOrganizerReportParams>) -> Result<CallToolResult, McpError> {
+        let now = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let output_path = p.output_path.unwrap_or_else(|| {
+            format!(r"C:\Users\rober\Downloads\Pill_Organizer_{}.pdf", now)
+        });
+        let result = reports::generate_pill_organizer_report(
+            &self.database,
+            &p.patient_name,
+            &output_path,
+        ).map_err(|e| McpError::internal_error(e, None))?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "Generate a detailed markdown summary of a day's meals, exercise, and nutrition. Includes ingredient-level breakdowns, exercise metrics, BP recovery data, and status against daily targets. Saves report to Downloads folder.")]
     fn generate_day_summary(&self, Parameters(p): Parameters<GenerateDaySummaryParams>) -> Result<CallToolResult, McpError> {
         let output_path = p.output_path.unwrap_or_else(|| {
@@ -2197,7 +2232,7 @@ impl ServerHandler for UhmService {
                  Vital Groups: create/get/list/update/delete_vital_group, assign_vital_to_group (for linking BP+HR etc). \
                  Exercise: add/get/list/update/delete_exercise, add/update/delete_exercise_segment, list_exercises_for_day, list_exercise_stats, recalculate_exercise_calories. \
                  Exercise calculates calories burned using current weight, speed, incline, and ACSM MET formula. Link PRE/POST vital groups for recovery tracking. \
-                 Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report, generate_medications_report. \
+                 Reports: set_patient_info (required first), get_patient_info, generate_bp_report, generate_hr_report, generate_medications_report, generate_pill_organizer_report. \
                  PDF reports include patient header, summary stats, color-coded daily tables, and trend charts. \
                  Verified: add_food_item_verified (creates food items with source tracking and sanity checks — label photo, USDA, or AI estimate). \
                  Audit: audit_food_items (data quality review — shows source tracking stats, filters by source type/usage). \

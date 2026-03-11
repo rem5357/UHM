@@ -9,6 +9,7 @@ use std::path::Path;
 
 use chrono::{Datelike, NaiveDate, Weekday};
 use printpdf::*;
+use printpdf::path::{PaintMode, WindingOrder};
 use printpdf::image_crate::{DynamicImage, RgbImage, ImageFormat};
 use serde::Serialize;
 
@@ -46,6 +47,14 @@ pub struct GenerateReportResponse {
 
 #[derive(Debug, Serialize)]
 pub struct GenerateMedicationsReportResponse {
+    pub success: bool,
+    pub file_path: String,
+    pub medication_count: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneratePillOrganizerReportResponse {
     pub success: bool,
     pub file_path: String,
     pub medication_count: usize,
@@ -3239,6 +3248,575 @@ pub fn generate_medications_report(
         file_path: output_path.to_string(),
         medication_count,
         message: format!("Medication list ({} {}) saved to {}", medication_count, status, output_path),
+    })
+}
+
+// ============================================================================
+// Pill Organizer Report
+// ============================================================================
+
+/// Time slot definition for pill organizer
+struct PillSlot {
+    label: &'static str,
+    bg_color: (u8, u8, u8),
+    label_color: (u8, u8, u8),
+}
+
+/// A medication entry assigned to a time slot
+#[derive(Clone)]
+struct PillEntry {
+    name: String,
+    dosage: String,
+    med_type_label: String,
+    pill_description: String,
+}
+
+/// Filled rectangle helper for colored backgrounds
+fn add_filled_rect(
+    layer: &PdfLayerReference,
+    x: f32,
+    y_top: f32,
+    w: f32,
+    h: f32,
+    color: (u8, u8, u8),
+) {
+    layer.set_fill_color(rgb_to_printpdf(color.0, color.1, color.2));
+    let polygon = Polygon {
+        rings: vec![vec![
+            (Point::new(Mm(x), Mm(y_top - h)), false),
+            (Point::new(Mm(x + w), Mm(y_top - h)), false),
+            (Point::new(Mm(x + w), Mm(y_top)), false),
+            (Point::new(Mm(x), Mm(y_top)), false),
+        ]],
+        mode: PaintMode::Fill,
+        winding_order: WindingOrder::NonZero,
+    };
+    layer.add_polygon(polygon);
+}
+
+/// Simple word-wrap: splits text into lines of approximately max_chars width
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line = word.to_string();
+        } else if current_line.len() + 1 + word.len() <= max_chars {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
+/// Assign a medication to time slot indices based on schedule_slot or frequency
+/// Returns indices: 0=Morning, 1=Midday, 2=Evening, 3=Bedtime
+fn assign_med_to_slots(med: &Medication) -> Vec<usize> {
+    // Check schedule_slot field first (user-defined override)
+    if let Some(ref slot) = med.schedule_slot {
+        let slot_lower = slot.to_lowercase();
+        if slot_lower == "all" {
+            return vec![0, 1, 2, 3];
+        }
+        let mut indices = Vec::new();
+        for s in slot_lower.split(',') {
+            match s.trim() {
+                "morning" | "am" => indices.push(0),
+                "midday" | "afternoon" => indices.push(1),
+                "evening" | "pm" => indices.push(2),
+                "bedtime" => indices.push(3),
+                _ => {}
+            }
+        }
+        if !indices.is_empty() {
+            indices.sort();
+            indices.dedup();
+            return indices;
+        }
+    }
+
+    // Parse from frequency string
+    if let Some(ref freq) = med.frequency {
+        let freq_lower = freq.to_lowercase();
+
+        // Four times daily → all slots
+        if freq_lower.contains("four times daily")
+            || freq_lower.contains("4 times daily")
+            || freq_lower.contains("4x daily")
+        {
+            return vec![0, 1, 2, 3];
+        }
+
+        // Three times daily
+        if freq_lower.contains("three times daily") || freq_lower.contains("3 times daily") {
+            return vec![0, 1, 2];
+        }
+
+        let mut indices = Vec::new();
+
+        if freq_lower.contains("bedtime") {
+            indices.push(3);
+        }
+        if freq_lower.contains("3 pm")
+            || freq_lower.contains("3pm")
+            || freq_lower.contains("midday")
+            || freq_lower.contains("afternoon")
+        {
+            indices.push(1);
+        }
+        if freq_lower.contains("am") || freq_lower.contains("morning") {
+            indices.push(0);
+        }
+        // "PM" means evening, but not if it's already tagged as midday (3 PM)
+        if freq_lower.contains("pm") || freq_lower.contains("evening") {
+            if !indices.contains(&1) {
+                indices.push(2);
+            }
+        }
+
+        if !indices.is_empty() {
+            indices.sort();
+            indices.dedup();
+            return indices;
+        }
+    }
+
+    // Default: morning
+    vec![0]
+}
+
+/// Check if a medication should be excluded from the pill organizer
+fn is_non_pill_med(med: &Medication) -> bool {
+    // Exclude non-pill dosage units
+    let non_pill_units = ["spray", "drop", "patch", "injection", "ml", "fl_oz", "puff"];
+    if non_pill_units.contains(&med.dosage_unit.as_str()) {
+        return true;
+    }
+
+    // Exclude Metamucil / fiber powder
+    let name_lower = med.name.to_lowercase();
+    if name_lower.contains("metamucil") {
+        return true;
+    }
+
+    // Check instructions/notes for non-pill forms
+    let non_pill_keywords = ["gel", "cream", "spray", "liquid", "powder", "solution", "topical"];
+    if let Some(ref instructions) = med.instructions {
+        let instr_lower = instructions.to_lowercase();
+        for kw in &non_pill_keywords {
+            if instr_lower.contains(kw) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Generate a Pill Organizer PDF report — single-page schedule for filling weekly pill containers
+pub fn generate_pill_organizer_report(
+    db: &Database,
+    patient_name: &str,
+    output_path: &str,
+) -> Result<GeneratePillOrganizerReportResponse, String> {
+    let conn = db.get_conn().map_err(|e| e.to_string())?;
+
+    // Get all active medications
+    let meds = Medication::list(&conn, true, None).map_err(|e| e.to_string())?;
+
+    if meds.is_empty() {
+        return Err("No active medications found.".to_string());
+    }
+
+    // Filter: exclude PRN, non-pill forms
+    let pill_meds: Vec<&Medication> = meds
+        .iter()
+        .filter(|m| {
+            // Exclude PRN
+            if let Some(ref freq) = m.frequency {
+                if freq.to_uppercase().contains("PRN") {
+                    return false;
+                }
+            }
+            // Exclude non-pill forms
+            !is_non_pill_med(m)
+        })
+        .collect();
+
+    if pill_meds.is_empty() {
+        return Err("No pill-form medications found after filtering.".to_string());
+    }
+
+    // Define time slots
+    let slots = [
+        PillSlot {
+            label: "Morning \u{2014} 8:00 AM",
+            bg_color: (232, 240, 254),   // #e8f0fe
+            label_color: (21, 101, 192), // #1565c0
+        },
+        PillSlot {
+            label: "Midday \u{2014} 3:00 PM",
+            bg_color: (255, 243, 205),  // #fff3cd
+            label_color: (230, 81, 0),  // #e65100
+        },
+        PillSlot {
+            label: "Evening \u{2014} 8:00 PM",
+            bg_color: (232, 245, 233),  // #e8f5e9
+            label_color: (46, 125, 50), // #2e7d32
+        },
+        PillSlot {
+            label: "Bedtime",
+            bg_color: (243, 229, 245),   // #f3e5f5
+            label_color: (106, 27, 154), // #6a1b9a
+        },
+    ];
+
+    // Assign meds to slots
+    let mut slot_entries: Vec<Vec<PillEntry>> = vec![Vec::new(); 4];
+    let mut total_entries = 0usize;
+    let mut has_multi_slot_med = false;
+
+    for med in &pill_meds {
+        let indices = assign_med_to_slots(med);
+        if indices.len() > 1 {
+            has_multi_slot_med = true;
+        }
+
+        let type_label = match med.med_type {
+            MedType::Prescription => "Rx",
+            MedType::Supplement => "Suppl.",
+            MedType::Otc => "OTC",
+            _ => med.med_type.display_name(),
+        };
+
+        let desc = med
+            .pill_description
+            .clone()
+            .unwrap_or_default();
+
+        let dosage_str = format!(
+            "{} {}",
+            format_dosage_amount(med.dosage_amount),
+            med.dosage_unit.display_name()
+        );
+
+        for &idx in &indices {
+            if idx < 4 {
+                slot_entries[idx].push(PillEntry {
+                    name: med.name.clone(),
+                    dosage: dosage_str.clone(),
+                    med_type_label: type_label.to_string(),
+                    pill_description: desc.clone(),
+                });
+                total_entries += 1;
+            }
+        }
+    }
+
+    // Find primary prescriber for subtitle
+    let prescriber = pill_meds
+        .iter()
+        .filter_map(|m| m.prescribing_doctor.as_deref())
+        .next()
+        .unwrap_or("—");
+
+    // ========================================================================
+    // PDF Generation
+    // ========================================================================
+
+    let (doc, page1, layer1) = PdfDocument::new(
+        "Pill Organizer Schedule",
+        Mm(215.9),
+        Mm(279.4),
+        "Layer 1",
+    );
+
+    let font = doc
+        .add_builtin_font(BuiltinFont::Helvetica)
+        .map_err(|e| e.to_string())?;
+    let font_bold = doc
+        .add_builtin_font(BuiltinFont::HelveticaBold)
+        .map_err(|e| e.to_string())?;
+    let font_italic = doc
+        .add_builtin_font(BuiltinFont::HelveticaOblique)
+        .map_err(|e| e.to_string())?;
+
+    let layer = doc.get_page(page1).get_layer(layer1);
+
+    // Layout constants (mm)
+    let margin: f32 = 12.7; // 0.5 inch
+    let page_width: f32 = 215.9;
+    let content_width: f32 = page_width - 2.0 * margin;
+
+    // Column positions (mm from left edge)
+    let col_name: f32 = margin + 3.5;
+    let col_dose: f32 = margin + 48.7;
+    let col_type: f32 = margin + 98.1;
+    let col_desc: f32 = margin + 110.1;
+
+    // Description column max chars (~50 chars at 9pt Helvetica)
+    let desc_max_chars: usize = 50;
+
+    // Colors
+    let color_banner: (u8, u8, u8) = (26, 54, 93);       // #1a365d
+    let color_white: (u8, u8, u8) = (255, 255, 255);
+    let color_subtitle: (u8, u8, u8) = (176, 196, 222);   // #b0c4de
+    let color_col_header: (u8, u8, u8) = (158, 158, 158); // #9e9e9e
+    let color_divider: (u8, u8, u8) = (176, 190, 197);    // #b0bec5
+    let color_text_dark: (u8, u8, u8) = (26, 26, 46);     // #1a1a2e
+    let color_text_blue: (u8, u8, u8) = (13, 71, 161);    // #0d47a1
+    let color_type_gray: (u8, u8, u8) = (117, 117, 117);  // #757575
+    let color_desc_gray: (u8, u8, u8) = (85, 85, 85);     // #555555
+    let color_row_alt: (u8, u8, u8) = (248, 249, 250);    // #f8f9fa
+    let color_note_bg: (u8, u8, u8) = (227, 242, 253);    // #e3f2fd
+    let color_note_label: (u8, u8, u8) = (21, 101, 192);  // #1565c0
+    let color_tip_bg: (u8, u8, u8) = (255, 248, 225);     // #fff8e1
+    let color_tip_label: (u8, u8, u8) = (230, 81, 0);     // #e65100
+    let color_text_body: (u8, u8, u8) = (51, 51, 51);     // #333333
+    let color_footer: (u8, u8, u8) = (189, 189, 189);     // #bdbdbd
+
+    let mut y: f32 = 279.4 - margin;
+
+    // --- Title Banner ---
+    let banner_h: f32 = 18.4; // ~52pt
+    add_filled_rect(&layer, margin, y, content_width, banner_h, color_banner);
+
+    // Title text (centered)
+    let title = format!("Medications \u{2014} {}", patient_name);
+    // Approximate centering: page center = 107.95mm
+    add_text(
+        &layer,
+        &font_bold,
+        &title,
+        Mm(page_width / 2.0 - 45.0),
+        Mm(y - 8.5),
+        22.0,
+        color_white,
+    );
+
+    // Subtitle
+    let subtitle = format!(
+        "Daily Pill Container Schedule  \u{2022}  Excludes PRN and non-pill items  \u{2022}  Prescriber: {}",
+        prescriber
+    );
+    add_text(
+        &layer,
+        &font,
+        &subtitle,
+        Mm(page_width / 2.0 - 72.0),
+        Mm(y - 15.0),
+        10.5,
+        color_subtitle,
+    );
+
+    y -= banner_h + 5.6; // gap below banner
+
+    // --- Column Headers ---
+    add_text(&layer, &font_bold, "MEDICATION", Mm(col_name), Mm(y), 8.5, color_col_header);
+    add_text(&layer, &font_bold, "DOSAGE", Mm(col_dose), Mm(y), 8.5, color_col_header);
+    add_text(&layer, &font_bold, "TYPE", Mm(col_type), Mm(y), 8.5, color_col_header);
+    add_text(&layer, &font_bold, "PILL DESCRIPTION", Mm(col_desc), Mm(y), 8.5, color_col_header);
+
+    y -= 2.1;
+    add_line(
+        &layer,
+        Mm(margin),
+        Mm(y),
+        Mm(page_width - margin),
+        Mm(y),
+        color_divider,
+        0.4,
+    );
+    y -= 2.8;
+
+    // --- Time Blocks ---
+    let section_bar_h: f32 = 7.8;  // 22pt
+    let row_h: f32 = 9.9;          // 28pt
+    let desc_line_h: f32 = 3.9;    // 11pt for wrapped second line
+
+    for (slot_idx, slot) in slots.iter().enumerate() {
+        let entries = &slot_entries[slot_idx];
+        if entries.is_empty() {
+            continue;
+        }
+
+        // Section header bar
+        add_filled_rect(&layer, margin, y, content_width, section_bar_h, slot.bg_color);
+        add_text(
+            &layer,
+            &font_bold,
+            slot.label,
+            Mm(margin + 2.8),
+            Mm(y - section_bar_h + 2.1),
+            13.0,
+            slot.label_color,
+        );
+        y -= section_bar_h + 1.8;
+
+        // Medication rows
+        for (i, entry) in entries.iter().enumerate() {
+            // Alternating row background
+            if i % 2 == 0 {
+                add_filled_rect(
+                    &layer,
+                    margin + 0.7,
+                    y + 2.8,
+                    content_width - 1.4,
+                    row_h,
+                    color_row_alt,
+                );
+            }
+
+            // Medication name
+            add_text(
+                &layer,
+                &font_bold,
+                &entry.name,
+                Mm(col_name),
+                Mm(y),
+                11.0,
+                color_text_dark,
+            );
+
+            // Dosage
+            add_text(
+                &layer,
+                &font,
+                &entry.dosage,
+                Mm(col_dose),
+                Mm(y),
+                10.5,
+                color_text_blue,
+            );
+
+            // Type (italic)
+            add_text(
+                &layer,
+                &font_italic,
+                &entry.med_type_label,
+                Mm(col_type),
+                Mm(y),
+                9.5,
+                color_type_gray,
+            );
+
+            // Pill description (with word wrap, max 2 lines)
+            if !entry.pill_description.is_empty() {
+                let lines = wrap_text(&entry.pill_description, desc_max_chars);
+                let mut desc_y = y;
+                for line in lines.iter().take(2) {
+                    add_text(
+                        &layer,
+                        &font,
+                        line,
+                        Mm(col_desc),
+                        Mm(desc_y),
+                        9.0,
+                        color_desc_gray,
+                    );
+                    desc_y -= desc_line_h;
+                }
+            }
+
+            y -= row_h;
+        }
+
+        y -= 1.4; // gap between sections
+    }
+
+    // --- Note Box (Atenolol / multi-slot med) ---
+    if has_multi_slot_med {
+        y -= 1.4;
+        let note_h: f32 = 7.8;
+        add_filled_rect(&layer, margin, y, content_width, note_h, color_note_bg);
+        add_text(
+            &layer,
+            &font_bold,
+            "Note:",
+            Mm(margin + 2.8),
+            Mm(y - note_h + 2.5),
+            9.5,
+            color_note_label,
+        );
+        add_text(
+            &layer,
+            &font,
+            "Atenolol total = 200 mg/day (4 \u{00d7} 50 mg). Each dose is half of a scored 100 mg tablet. Imprint varies by manufacturer/refill.",
+            Mm(margin + 14.8),
+            Mm(y - note_h + 2.5),
+            9.5,
+            color_text_body,
+        );
+        y -= note_h;
+    }
+
+    // --- Tip Box ---
+    y -= 2.8;
+    let tip_h: f32 = 7.8;
+    add_filled_rect(&layer, margin, y, content_width, tip_h, color_tip_bg);
+    add_text(
+        &layer,
+        &font_bold,
+        "Tip:",
+        Mm(margin + 2.8),
+        Mm(y - tip_h + 2.5),
+        9.5,
+        color_tip_label,
+    );
+    add_text(
+        &layer,
+        &font,
+        "Generic pill imprints change between refills as pharmacy suppliers rotate. Verify markings on your current bottles if unsure.",
+        Mm(margin + 11.3),
+        Mm(y - tip_h + 2.5),
+        9.5,
+        color_text_body,
+    );
+
+    // --- Footer ---
+    let now = chrono::Local::now().format("%B %d, %Y").to_string();
+    let footer_text = format!(
+        "Generated {}  \u{2022}  Review with your physician before making changes",
+        now
+    );
+    add_text(
+        &layer,
+        &font_italic,
+        &footer_text,
+        Mm(page_width / 2.0 - 55.0),
+        Mm(margin - 2.1),
+        9.0,
+        color_footer,
+    );
+
+    // Save PDF
+    let path = Path::new(output_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = File::create(path).map_err(|e| e.to_string())?;
+    let writer = BufWriter::new(file);
+    doc.save(&mut std::io::BufWriter::new(writer))
+        .map_err(|e| e.to_string())?;
+
+    Ok(GeneratePillOrganizerReportResponse {
+        success: true,
+        file_path: output_path.to_string(),
+        medication_count: pill_meds.len(),
+        message: format!(
+            "Pill organizer report ({} medications, {} entries across {} time slots) saved to {}",
+            pill_meds.len(),
+            total_entries,
+            slot_entries.iter().filter(|s| !s.is_empty()).count(),
+            output_path
+        ),
     })
 }
 

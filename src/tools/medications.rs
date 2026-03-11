@@ -54,6 +54,8 @@ pub struct MedicationDetail {
     pub end_date: Option<String>,
     pub discontinue_reason: Option<String>,
     pub notes: Option<String>,
+    pub pill_description: Option<String>,
+    pub schedule_slot: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -94,6 +96,8 @@ impl From<Medication> for MedicationDetail {
             end_date: med.end_date,
             discontinue_reason: med.discontinue_reason,
             notes: med.notes,
+            pill_description: med.pill_description,
+            schedule_slot: med.schedule_slot,
             created_at: med.created_at,
             updated_at: med.updated_at,
         }
