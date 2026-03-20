@@ -62,6 +62,8 @@ pub struct FoodItem {
     pub ww_points: Option<f64>,
     /// Whether this is a WW ZeroPoint food (always scores 0)
     pub ww_zero_point: bool,
+    /// Source of WW points: "formula" (auto-calculated) or "community" (manually set from WW community data)
+    pub ww_source: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -103,6 +105,12 @@ pub struct FoodItemCreate {
     /// Override WW ZeroPoint flag (auto-detected if not provided)
     #[serde(default)]
     pub ww_zero_point: Option<bool>,
+    /// WW points source: "formula" (default, auto-calculated) or "community" (manually set)
+    #[serde(default)]
+    pub ww_source: Option<String>,
+    /// Manual WW points override (used when ww_source = "community")
+    #[serde(default)]
+    pub ww_points_override: Option<f64>,
 }
 
 /// Data for updating a food item
@@ -135,6 +143,10 @@ pub struct FoodItemUpdate {
     pub source_detail: Option<String>,
     /// Update WW ZeroPoint flag
     pub ww_zero_point: Option<bool>,
+    /// Update WW points source: "formula" or "community"
+    pub ww_source: Option<String>,
+    /// Manual WW points override (used when ww_source = "community")
+    pub ww_points_override: Option<f64>,
 }
 
 /// Calculate WW SmartPoints from nutrition values
@@ -179,6 +191,7 @@ impl FoodItem {
             source_detail: row.get("source_detail")?,
             ww_points: row.get("ww_points")?,
             ww_zero_point: row.get::<_, i32>("ww_zero_point").unwrap_or(0) != 0,
+            ww_source: row.get("ww_source").ok(),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -203,8 +216,13 @@ impl FoodItem {
 
         // Calculate WW points
         let ww_zero_point = data.ww_zero_point.unwrap_or(false);
+        let ww_source = data.ww_source.clone().unwrap_or_else(|| "formula".to_string());
         let ww_points = if ww_zero_point {
             0.0
+        } else if ww_source == "community" {
+            data.ww_points_override.unwrap_or_else(||
+                calculate_ww_points(data.calories, data.saturated_fat, data.sugar, data.protein)
+            )
         } else {
             calculate_ww_points(data.calories, data.saturated_fat, data.sugar, data.protein)
         };
@@ -215,8 +233,8 @@ impl FoodItem {
                 name, brand, serving_size, serving_unit,
                 calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol,
                 preference, notes, base_unit_type, grams_per_serving, ml_per_serving,
-                source, source_detail, ww_points, ww_zero_point
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                source, source_detail, ww_points, ww_zero_point, ww_source
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
             "#,
             params![
                 data.name,
@@ -241,6 +259,7 @@ impl FoodItem {
                 data.source_detail,
                 ww_points,
                 ww_zero_point as i32,
+                ww_source,
             ],
         )?;
 
@@ -459,18 +478,36 @@ impl FoodItem {
             params_vec.push(Box::new(zp as i32));
         }
 
-        // Recalculate WW points if any nutrition field changed or zero_point flag changed
-        let nutrition_changed = data.calories.is_some() || data.saturated_fat.is_some()
-            || data.sugar.is_some() || data.protein.is_some() || data.ww_zero_point.is_some();
-        if nutrition_changed {
-            let is_zero = data.ww_zero_point.unwrap_or(current.ww_zero_point);
-            let cal = data.calories.unwrap_or(current.nutrition.calories);
-            let sf = data.saturated_fat.unwrap_or(current.nutrition.saturated_fat);
-            let sug = data.sugar.unwrap_or(current.nutrition.sugar);
-            let pro = data.protein.unwrap_or(current.nutrition.protein);
-            let ww = if is_zero { 0.0 } else { calculate_ww_points(cal, sf, sug, pro) };
+        // WW source
+        if let Some(ref src) = data.ww_source {
+            updates.push(format!("ww_source = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(src.clone()));
+        }
+
+        // Determine effective ww_source for auto-calc decision
+        let effective_ww_source = data.ww_source.as_deref()
+            .or(current.ww_source.as_deref())
+            .unwrap_or("formula");
+
+        // If community-sourced with explicit override, use that
+        if let Some(override_pts) = data.ww_points_override {
             updates.push(format!("ww_points = ?{}", params_vec.len() + 1));
-            params_vec.push(Box::new(ww));
+            params_vec.push(Box::new(override_pts));
+        } else if effective_ww_source != "community" {
+            // Recalculate WW points if any nutrition field changed or zero_point flag changed
+            // Skip auto-calc for community-sourced items
+            let nutrition_changed = data.calories.is_some() || data.saturated_fat.is_some()
+                || data.sugar.is_some() || data.protein.is_some() || data.ww_zero_point.is_some();
+            if nutrition_changed {
+                let is_zero = data.ww_zero_point.unwrap_or(current.ww_zero_point);
+                let cal = data.calories.unwrap_or(current.nutrition.calories);
+                let sf = data.saturated_fat.unwrap_or(current.nutrition.saturated_fat);
+                let sug = data.sugar.unwrap_or(current.nutrition.sugar);
+                let pro = data.protein.unwrap_or(current.nutrition.protein);
+                let ww = if is_zero { 0.0 } else { calculate_ww_points(cal, sf, sug, pro) };
+                updates.push(format!("ww_points = ?{}", params_vec.len() + 1));
+                params_vec.push(Box::new(ww));
+            }
         }
 
         if updates.is_empty() {

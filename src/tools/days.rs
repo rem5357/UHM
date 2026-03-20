@@ -140,14 +140,12 @@ pub struct ListOrphanedDaysResponse {
 
 /// Determine WW tier from net points and protein
 fn ww_tier(net_points: f64, protein: f64) -> &'static str {
-    if net_points <= 25.0 && protein >= 140.0 {
+    if net_points <= 35.0 && protein >= 140.0 {
         "MEGA Win"
-    } else if net_points <= 30.0 {
-        "Super Win"
-    } else if net_points <= 35.0 {
-        "Win"
     } else if net_points <= 40.0 {
-        "Watch Zone"
+        "Super Win"
+    } else if net_points <= 45.0 {
+        "Win"
     } else {
         "Red Alert"
     }
@@ -260,7 +258,7 @@ pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
                 ww_points_net: ww_net,
                 ww_points_gross: ww_gross,
                 ww_exercise_credit: ww_credit,
-                ww_budget: 35.0,
+                ww_budget: 45.0,
                 ww_tier: tier.to_string(),
                 meals,
                 exercises,

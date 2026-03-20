@@ -1,9 +1,11 @@
 # UHM - Universal Health Manager
 
-**Version:** 1.1.0 | **Build:** 132 | **Updated:** 2026-03-20
+**Version:** 1.1.0 | **Build:** 135 | **Updated:** 2026-03-20
 
 ## Changelog
 
+- **Build 135** (2026-03-20): WW source tracking — `ww_source` column ("formula"/"community") on food_items, `ww_points_override` param for community-sourced points, auto-calc skipped for community items on update. Updated food_item_instructions with WW sourcing priority.
+- **Build 134** (2026-03-20): Updated WW budget from 35 to 45 daily points. Revised tier thresholds: ≤35+140g protein=MEGA Win, ≤40=Super Win, ≤45=Win, >45=Red Alert. Removed Watch Zone tier.
 - **Build 132** (2026-03-20): Weight Watchers points integration — SmartPoints formula on food items, ZeroPoint food flagging, meal/day/exercise WW tracking, tier classification system.
 - **Build 123** (2026-03-04): Fuzzy search tier — strsim Jaro-Winkler between LIKE and Haiku. `search_method` field on batch results.
 
@@ -607,8 +609,8 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 
 ### Phase 29: Weight Watchers Points Integration
 - **Purpose**: Add WW SmartPoints as a supplemental food quality metric alongside existing calorie/macro tracking
-- **Database Schema** (Migration v12):
-  - `food_items`: `ww_points` (f64, nullable), `ww_zero_point` (bool, default false)
+- **Database Schema** (Migrations v12-v13):
+  - `food_items`: `ww_points` (f64, nullable), `ww_zero_point` (bool, default false), `ww_source` (text, default "formula")
   - `meal_entries`: `cached_ww_points` (f64, default 0)
   - `exercises`: `ww_activity_points` (f64, default 0)
   - `days`: `cached_ww_points_gross`, `cached_ww_exercise_credit`, `cached_ww_points_net` (all f64, default 0)
@@ -617,25 +619,26 @@ UHM is a health and nutrition tracking system built as an MCP (Model Context Pro
 - **Meal Entry WW**: If source food is ZeroPoint → 0 pts. Otherwise, `food_item.ww_points × servings × (percent_eaten / 100)`. Recipe-based entries use formula on cached nutrition.
 - **Exercise Credit**: `weight_lbs × duration_min × 0.00047`, capped at 6 points per session. Stored as `ww_activity_points` on exercises table.
 - **Day Aggregation**: `cached_ww_points_gross` = sum of meal entry WW points. `cached_ww_exercise_credit` = sum of exercise WW activity points. `cached_ww_points_net` = gross − exercise credit.
-- **Tier System** (daily budget: 35 pts):
+- **Tier System** (daily budget: 45 pts):
   | Threshold | Tier |
   |-----------|------|
-  | ≤25 pts net + ≥140g protein | MEGA Win |
-  | ≤30 pts net | Super Win |
-  | ≤35 pts net | Win |
-  | 36-40 pts net | Watch Zone |
-  | >40 pts net | Red Alert |
-- **Reporting**: WW points appear as first fields in `get_day` and `list_days` output. `DayDetail` includes `ww_points_net`, `ww_points_gross`, `ww_exercise_credit`, `ww_budget` (35), `ww_tier`. `DaySummary` includes `ww_points_net`, `ww_tier`. `MealEntryDetail` includes `ww_points`. `DayExerciseSummary` includes `ww_activity_points`.
-- **Auto-calculation**: WW points auto-calculated on food item create/update. Recalculated when nutrition fields change.
-- **Backfill**: Migration v12 calculates WW points for all existing food items, flags ZeroPoint foods by name pattern, and recalculates March 2026 meal entries and day totals.
+  | ≤35 pts net + ≥140g protein | MEGA Win |
+  | ≤40 pts net | Super Win |
+  | ≤45 pts net | Win |
+  | >45 pts net | Red Alert |
+- **Reporting**: WW points appear as first fields in `get_day` and `list_days` output. `DayDetail` includes `ww_points_net`, `ww_points_gross`, `ww_exercise_credit`, `ww_budget` (45), `ww_tier`. `DaySummary` includes `ww_points_net`, `ww_tier`. `MealEntryDetail` includes `ww_points`. `DayExerciseSummary` includes `ww_activity_points`.
+- **WW Source Tracking**: `ww_source` field on food_items — "formula" (default, auto-calculated) or "community" (manually set from WW community data). When `ww_source = "community"`, auto-calculation is skipped on update. New `ww_points_override` param on `add_food_item`/`update_food_item` for setting community-sourced points directly.
+- **Auto-calculation**: WW points auto-calculated on food item create/update for formula-sourced items. Skipped for community-sourced items. Recalculated when nutrition fields change.
+- **Backfill**: Migration v12 calculates WW points for all existing food items, flags ZeroPoint foods by name pattern, and recalculates March 2026 meal entries and day totals. Migration v13 adds `ww_source` column.
 - **Files Modified**:
-  - `src/db/migrations.rs` - Migration v12 with schema + backfill
-  - `src/models/food_item.rs` - `ww_points`, `ww_zero_point`, `calculate_ww_points()`, auto-calc on create/update
+  - `src/db/migrations.rs` - Migrations v12 (schema + backfill) and v13 (ww_source column)
+  - `src/models/food_item.rs` - `ww_points`, `ww_zero_point`, `ww_source`, `calculate_ww_points()`, auto-calc with community skip
   - `src/models/meal_entry.rs` - `cached_ww_points`, threaded through create/create_direct/refresh/recalculate
   - `src/models/exercise.rs` - `ww_activity_points` in recalculate_totals and recalculate_day_exercise_calories
   - `src/tools/days.rs` - WW fields on DayDetail, DaySummary, DayExerciseSummary, ww_tier() helper
-  - `src/mcp/server.rs` - `ww_zero_point` on FoodItemCreate/Update param structs
-  - `src/tools/verified.rs` - `ww_zero_point` on verified create path
+  - `src/tools/status.rs` - WW sourcing priority in FOOD_ITEM_INSTRUCTIONS
+  - `src/mcp/server.rs` - `ww_source`, `ww_points_override` on AddFoodItemParams/UpdateFoodItemParams
+  - `src/tools/verified.rs` - `ww_zero_point`, `ww_source`, `ww_points_override` on verified create path
 
 ## Technology Stack
 

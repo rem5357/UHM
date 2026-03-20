@@ -1042,6 +1042,27 @@ Use these when labels don't provide gram weights:
 
 When in doubt between solid and discrete, prefer "g" — it allows fractional usage in recipes.
 
+## WW Points Sourcing
+
+When creating a new food item, WW points are determined as follows:
+
+### Priority 1: Label/USDA data available
+WW points are auto-calculated by UHM from the SmartPoints formula using the item's
+nutritional data. No manual action needed — the system handles this on insert/update.
+Leave `ww_source` unset (defaults to "formula").
+
+### Priority 2: No label/USDA (compound foods, restaurant items, sushi, etc.)
+Before creating the item, search for community WW points estimates from the WW app
+database or community sites (skinnytaste, watcherspoint, WW forums). If a reliable
+community consensus exists, use that value directly:
+- Set `ww_source: "community"`
+- Set `ww_points_override: <community_value>`
+This overrides the formula. The auto-calculator will NOT overwrite community-sourced
+points on future updates.
+
+### Priority 3: No community data available
+Fall back to formula calculation (default behavior). Leave both fields unset.
+
 ## Checklist Before Calling add_food_item
 
 1. ✓ serving_size is 100 (for g/ml) or 1 (for count)
@@ -1050,6 +1071,7 @@ When in doubt between solid and discrete, prefer "g" — it allows fractional us
 4. ✓ No label serving sizes leaked through (e.g., values for "1 tbsp" instead of "per 100g")
 5. ✓ Sodium is in mg (not g)
 6. ✓ Cholesterol is in mg (not g)
+7. ✓ For community WW items: ww_source = "community" and ww_points_override set
 "#;
 
 /// Runtime status of the UHM service

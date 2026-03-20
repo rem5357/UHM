@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -88,6 +88,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 12 {
         migrate_v12(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (12)", [])?;
+    }
+
+    if current_version < 13 {
+        migrate_v13(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (13)", [])?;
     }
 
     Ok(())
@@ -892,6 +897,20 @@ fn migrate_v12(conn: &Connection) -> DbResult<()> {
         WHERE date >= '2026-03-01'
         "#,
         [],
+    )?;
+
+    Ok(())
+}
+
+/// Migration v13: WW source tracking for community-sourced points
+fn migrate_v13(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- Add ww_source column to food_items
+        -- "formula" = auto-calculated from SmartPoints formula (default)
+        -- "community" = manually set from WW community data (skip auto-calc on update)
+        ALTER TABLE food_items ADD COLUMN ww_source TEXT DEFAULT 'formula';
+        "#,
     )?;
 
     Ok(())

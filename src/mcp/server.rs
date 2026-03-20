@@ -113,6 +113,10 @@ pub struct AddFoodItemParams {
     pub source: Option<String>,
     /// Free-text provenance details (optional)
     pub source_detail: Option<String>,
+    /// WW points source: "formula" (default, auto-calculated) or "community" (manually set from WW community data)
+    pub ww_source: Option<String>,
+    /// Manual WW points value (used when ww_source = "community")
+    pub ww_points_override: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -168,6 +172,10 @@ pub struct UpdateFoodItemParams {
     pub source: Option<String>,
     /// Update provenance details
     pub source_detail: Option<String>,
+    /// Update WW points source: "formula" or "community"
+    pub ww_source: Option<String>,
+    /// Manual WW points override (used when ww_source = "community")
+    pub ww_points_override: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1089,6 +1097,7 @@ impl UhmService {
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
             source: p.source, source_detail: p.source_detail,
             ww_zero_point: None,
+            ww_source: p.ww_source, ww_points_override: p.ww_points_override,
         };
         let result = food_items::add_food_item(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1138,6 +1147,7 @@ impl UhmService {
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
             source: p.source, source_detail: p.source_detail,
             ww_zero_point: None,
+            ww_source: p.ww_source, ww_points_override: p.ww_points_override,
         };
 
         // Check if batch mode is active
