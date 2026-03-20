@@ -1088,6 +1088,7 @@ impl UhmService {
             notes: p.notes,
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
             source: p.source, source_detail: p.source_detail,
+            ww_zero_point: None,
         };
         let result = food_items::add_food_item(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1136,6 +1137,7 @@ impl UhmService {
             cholesterol: p.cholesterol, preference: p.preference.map(|s| Preference::from_str(&s)), notes: p.notes,
             base_unit_type: None, grams_per_serving: None, ml_per_serving: None,
             source: p.source, source_detail: p.source_detail,
+            ww_zero_point: None,
         };
 
         // Check if batch mode is active

@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 12;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -83,6 +83,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 11 {
         migrate_v11(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (11)", [])?;
+    }
+
+    if current_version < 12 {
+        migrate_v12(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (12)", [])?;
     }
 
     Ok(())
@@ -732,6 +737,161 @@ fn migrate_v11(conn: &Connection) -> DbResult<()> {
         ALTER TABLE medications ADD COLUMN pill_description TEXT;
         ALTER TABLE medications ADD COLUMN schedule_slot TEXT;
         "#,
+    )?;
+
+    Ok(())
+}
+
+/// Migration v12: Weight Watchers points tracking
+fn migrate_v12(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- ============================================
+        -- WEIGHT WATCHERS POINTS SUPPORT
+        -- Add WW points to food_items, meal_entries,
+        -- exercises, and days tables
+        -- ============================================
+
+        -- Food items: WW points per serving and ZeroPoint flag
+        ALTER TABLE food_items ADD COLUMN ww_points REAL;
+        ALTER TABLE food_items ADD COLUMN ww_zero_point INTEGER NOT NULL DEFAULT 0;
+
+        -- Meal entries: cached WW points for this entry
+        ALTER TABLE meal_entries ADD COLUMN cached_ww_points REAL NOT NULL DEFAULT 0;
+
+        -- Exercises: WW activity points earned
+        ALTER TABLE exercises ADD COLUMN ww_activity_points REAL NOT NULL DEFAULT 0;
+
+        -- Days: WW daily totals
+        ALTER TABLE days ADD COLUMN cached_ww_points_gross REAL NOT NULL DEFAULT 0;
+        ALTER TABLE days ADD COLUMN cached_ww_exercise_credit REAL NOT NULL DEFAULT 0;
+        ALTER TABLE days ADD COLUMN cached_ww_points_net REAL NOT NULL DEFAULT 0;
+        "#,
+    )?;
+
+    // Backfill WW points for all existing food items
+    // Formula: points = (cal * 0.0305) + (sat_fat * 0.275) + (sugar * 0.12) - (protein * 0.098)
+    // Rounded to nearest integer, floor at 0
+    conn.execute_batch(
+        r#"
+        UPDATE food_items SET ww_points = MAX(0, ROUND(
+            (calories * 0.0305) + (saturated_fat * 0.275) + (sugar * 0.12) - (protein * 0.098)
+        ));
+        "#,
+    )?;
+
+    // Flag ZeroPoint foods based on name patterns
+    // Categories: skinless poultry, eggs, fish/shellfish, non-starchy vegetables,
+    // potatoes, fruits, beans/legumes, non-fat yogurt, tofu
+    conn.execute_batch(
+        r#"
+        UPDATE food_items SET ww_zero_point = 1, ww_points = 0
+        WHERE
+            -- Poultry (skinless/boneless/ground)
+            (LOWER(name) LIKE '%chicken breast%' OR LOWER(name) LIKE '%turkey breast%'
+             OR LOWER(name) LIKE '%skinless chicken%' OR LOWER(name) LIKE '%skinless turkey%'
+             OR (LOWER(name) LIKE '%chicken%' AND LOWER(name) LIKE '%skinless%')
+             OR (LOWER(name) LIKE '%chicken%' AND LOWER(name) LIKE '%boneless%' AND LOWER(name) NOT LIKE '%skin-on%')
+             OR (LOWER(name) LIKE '%turkey%' AND LOWER(name) LIKE '%boneless%' AND LOWER(name) NOT LIKE '%skin-on%')
+             OR LOWER(name) LIKE '%ground turkey%' OR LOWER(name) LIKE '%ground chicken%')
+            -- Eggs
+            OR (LOWER(name) LIKE '%egg%' AND LOWER(name) NOT LIKE '%eggplant%'
+                AND LOWER(name) NOT LIKE '%egg roll%' AND LOWER(name) NOT LIKE '%egg noodle%')
+            -- Fish and shellfish
+            OR LOWER(name) LIKE '%salmon%' OR LOWER(name) LIKE '%tuna%'
+            OR LOWER(name) LIKE '%tilapia%' OR LOWER(name) LIKE '%cod %'
+            OR LOWER(name) LIKE '%shrimp%' OR LOWER(name) LIKE '%crab%'
+            OR LOWER(name) LIKE '%lobster%' OR LOWER(name) LIKE '%scallop%'
+            OR LOWER(name) LIKE '%halibut%' OR LOWER(name) LIKE '%trout%'
+            OR LOWER(name) LIKE '%sardine%' OR LOWER(name) LIKE '%mahi%'
+            OR LOWER(name) LIKE '%swordfish%' OR LOWER(name) LIKE '%bass %'
+            -- Beans and legumes
+            OR LOWER(name) LIKE '%black bean%' OR LOWER(name) LIKE '%kidney bean%'
+            OR LOWER(name) LIKE '%pinto bean%' OR LOWER(name) LIKE '%chickpea%'
+            OR LOWER(name) LIKE '%lentil%' OR LOWER(name) LIKE '%navy bean%'
+            OR LOWER(name) LIKE '%garbanzo%' OR LOWER(name) LIKE '%cannellini%'
+            -- Tofu
+            OR LOWER(name) LIKE '%tofu%'
+            -- Non-fat yogurt
+            OR (LOWER(name) LIKE '%yogurt%' AND (LOWER(name) LIKE '%nonfat%'
+                OR LOWER(name) LIKE '%non-fat%' OR LOWER(name) LIKE '%fat free%'
+                OR LOWER(name) LIKE '%0% fat%' OR LOWER(name) LIKE '%fat-free%'))
+            -- Fruits (common)
+            OR LOWER(name) LIKE '%apple%' OR LOWER(name) LIKE '%banana%'
+            OR LOWER(name) LIKE '%orange%' OR LOWER(name) LIKE '%strawberr%'
+            OR LOWER(name) LIKE '%blueberr%' OR LOWER(name) LIKE '%raspberr%'
+            OR LOWER(name) LIKE '%grape%' OR LOWER(name) LIKE '%watermelon%'
+            OR LOWER(name) LIKE '%peach%' OR LOWER(name) LIKE '%pear %'
+            OR LOWER(name) LIKE '%mango%' OR LOWER(name) LIKE '%pineapple%'
+            OR LOWER(name) LIKE '%kiwi%' OR LOWER(name) LIKE '%plum%'
+            OR LOWER(name) LIKE '%cherry%' OR LOWER(name) LIKE '%cantaloupe%'
+            -- Vegetables (non-starchy + potatoes which WW includes)
+            OR LOWER(name) LIKE '%broccoli%' OR LOWER(name) LIKE '%spinach%'
+            OR LOWER(name) LIKE '%kale%' OR LOWER(name) LIKE '%lettuce%'
+            OR LOWER(name) LIKE '%carrot%' OR LOWER(name) LIKE '%tomato%'
+            OR LOWER(name) LIKE '%cucumber%' OR LOWER(name) LIKE '%pepper%'
+            OR LOWER(name) LIKE '%onion%' OR LOWER(name) LIKE '%mushroom%'
+            OR LOWER(name) LIKE '%zucchini%' OR LOWER(name) LIKE '%celery%'
+            OR LOWER(name) LIKE '%cauliflower%' OR LOWER(name) LIKE '%asparagus%'
+            OR LOWER(name) LIKE '%green bean%' OR LOWER(name) LIKE '%potato%'
+            OR LOWER(name) LIKE '%sweet potato%' OR LOWER(name) LIKE '%corn %'
+            OR LOWER(name) LIKE '%peas%' OR LOWER(name) LIKE '%cabbage%'
+            -- Frozen vegetable blends
+            OR LOWER(name) LIKE '%normandy%' OR LOWER(name) LIKE '%steamfresh%'
+            OR LOWER(name) LIKE '%blend vegetables%' OR LOWER(name) LIKE '%vegetables%blend%'
+            OR LOWER(name) LIKE '%mixed vegetables%' OR LOWER(name) LIKE '%stir fry vegetables%'
+            -- Broths and stocks (near-zero calorie)
+            OR LOWER(name) LIKE '%chicken broth%' OR LOWER(name) LIKE '%beef broth%'
+            OR LOWER(name) LIKE '%cooking stock%'
+        ;
+        "#,
+    )?;
+
+    // Backfill meal entry WW points for March 2026 forward
+    // For each meal entry: if food item is zero_point → 0, else scale ww_points by servings * percent/100
+    conn.execute(
+        r#"
+        UPDATE meal_entries SET cached_ww_points = CASE
+            WHEN food_item_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM food_items fi WHERE fi.id = meal_entries.food_item_id AND fi.ww_zero_point = 1
+            ) THEN 0
+            WHEN food_item_id IS NOT NULL THEN
+                COALESCE((SELECT fi.ww_points FROM food_items fi WHERE fi.id = meal_entries.food_item_id), 0)
+                * servings * (percent_eaten / 100.0)
+            WHEN recipe_id IS NOT NULL THEN
+                -- For recipes, sum the WW points of ingredients (approximation: use cached calories formula)
+                MAX(0, ROUND(
+                    (cached_calories * 0.0305) + (cached_saturated_fat * 0.275)
+                    + (cached_sugar * 0.12) - (cached_protein * 0.098)
+                ))
+            ELSE 0
+        END
+        WHERE day_id IN (SELECT id FROM days WHERE date >= '2026-03-01')
+        "#,
+        [],
+    )?;
+
+    // Backfill day WW totals for March 2026 forward
+    conn.execute(
+        r#"
+        UPDATE days SET
+            cached_ww_points_gross = COALESCE((
+                SELECT SUM(cached_ww_points) FROM meal_entries WHERE meal_entries.day_id = days.id
+            ), 0),
+            cached_ww_exercise_credit = COALESCE((
+                SELECT SUM(ww_activity_points) FROM exercises WHERE exercises.day_id = days.id
+            ), 0)
+        WHERE date >= '2026-03-01'
+        "#,
+        [],
+    )?;
+
+    conn.execute(
+        r#"
+        UPDATE days SET cached_ww_points_net = cached_ww_points_gross - cached_ww_exercise_credit
+        WHERE date >= '2026-03-01'
+        "#,
+        [],
     )?;
 
     Ok(())

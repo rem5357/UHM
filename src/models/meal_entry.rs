@@ -56,6 +56,7 @@ pub struct MealEntry {
     /// Unit for direct quantity (g, ml, count)
     pub unit: Option<String>,
     pub cached_nutrition: Nutrition,
+    pub cached_ww_points: f64,
     pub notes: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -74,6 +75,7 @@ pub struct MealEntryDetail {
     pub servings: f64,
     pub percent_eaten: f64,
     pub nutrition: Nutrition,
+    pub ww_points: f64,
     pub notes: Option<String>,
     pub created_at: String,
 }
@@ -124,6 +126,7 @@ impl MealEntry {
                 saturated_fat: row.get("cached_saturated_fat")?,
                 cholesterol: row.get("cached_cholesterol")?,
             },
+            cached_ww_points: row.get("cached_ww_points").unwrap_or(0.0),
             notes: row.get("notes")?,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
@@ -146,21 +149,26 @@ impl MealEntry {
 
         let percent_eaten = data.percent_eaten.unwrap_or(100.0);
 
-        // Calculate nutrition based on source
-        let base_nutrition = if let Some(recipe_id) = data.recipe_id {
+        // Calculate nutrition and WW points based on source
+        let (base_nutrition, base_ww_points) = if let Some(recipe_id) = data.recipe_id {
             let recipe = Recipe::get_by_id(conn, recipe_id)?
                 .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-            recipe.cached_nutrition
+            let n = &recipe.cached_nutrition;
+            let ww = super::food_item::calculate_ww_points(n.calories, n.saturated_fat, n.sugar, n.protein);
+            (recipe.cached_nutrition, ww)
         } else if let Some(food_item_id) = data.food_item_id {
             let food_item = FoodItem::get_by_id(conn, food_item_id)?
                 .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-            food_item.nutrition
+            let ww = if food_item.ww_zero_point { 0.0 } else { food_item.ww_points.unwrap_or(0.0) };
+            (food_item.nutrition, ww)
         } else {
-            Nutrition::zero()
+            (Nutrition::zero(), 0.0)
         };
 
         // Scale by servings and percent eaten
-        let nutrition = base_nutrition.scale(data.servings * (percent_eaten / 100.0));
+        let scale = data.servings * (percent_eaten / 100.0);
+        let nutrition = base_nutrition.scale(scale);
+        let ww_points = base_ww_points * scale;
 
         conn.execute(
             r#"
@@ -168,9 +176,9 @@ impl MealEntry {
                 day_id, meal_type, recipe_id, food_item_id, servings, percent_eaten,
                 cached_calories, cached_protein, cached_carbs, cached_fat,
                 cached_fiber, cached_sodium, cached_sugar, cached_saturated_fat,
-                cached_cholesterol, notes
+                cached_cholesterol, cached_ww_points, notes
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             "#,
             params![
                 data.day_id,
@@ -188,6 +196,7 @@ impl MealEntry {
                 nutrition.sugar,
                 nutrition.saturated_fat,
                 nutrition.cholesterol,
+                ww_points,
                 data.notes,
             ],
         )?;
@@ -227,7 +236,12 @@ impl MealEntry {
         let multiplier = calculate_direct_log_multiplier(quantity, unit, &food_item);
 
         // Scale nutrition by multiplier and percent eaten
-        let nutrition = food_item.nutrition.scale(multiplier * (percent_eaten / 100.0));
+        let scale = multiplier * (percent_eaten / 100.0);
+        let nutrition = food_item.nutrition.scale(scale);
+
+        // Calculate WW points
+        let base_ww = if food_item.ww_zero_point { 0.0 } else { food_item.ww_points.unwrap_or(0.0) };
+        let ww_points = base_ww * scale;
 
         // Use servings=multiplier for backwards compatibility with existing queries
         let servings = multiplier;
@@ -239,9 +253,9 @@ impl MealEntry {
                 quantity, unit,
                 cached_calories, cached_protein, cached_carbs, cached_fat,
                 cached_fiber, cached_sodium, cached_sugar, cached_saturated_fat,
-                cached_cholesterol, notes
+                cached_cholesterol, cached_ww_points, notes
             )
-            VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
                 day_id,
@@ -260,6 +274,7 @@ impl MealEntry {
                 nutrition.sugar,
                 nutrition.saturated_fat,
                 nutrition.cholesterol,
+                ww_points,
                 notes,
             ],
         )?;
@@ -319,6 +334,7 @@ impl MealEntry {
                     servings: entry.servings,
                     percent_eaten: entry.percent_eaten,
                     nutrition: entry.cached_nutrition,
+                    ww_points: entry.cached_ww_points,
                     notes: entry.notes,
                     created_at: entry.created_at,
                 }))
@@ -371,6 +387,7 @@ impl MealEntry {
                 servings: entry.servings,
                 percent_eaten: entry.percent_eaten,
                 nutrition: entry.cached_nutrition,
+                ww_points: entry.cached_ww_points,
                 notes: entry.notes,
                 created_at: entry.created_at,
             });
@@ -502,26 +519,31 @@ pub fn calculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nutri
     Ok(total)
 }
 
-/// Refresh a meal entry's cached nutrition from its source (recipe or food_item)
-/// Returns the updated nutrition value
-fn refresh_meal_entry_nutrition(conn: &Connection, entry: &MealEntry) -> DbResult<Nutrition> {
-    // Get current nutrition from source
-    let base_nutrition = if let Some(recipe_id) = entry.recipe_id {
+/// Refresh a meal entry's cached nutrition and WW points from its source
+/// Returns (nutrition, ww_points)
+fn refresh_meal_entry_nutrition(conn: &Connection, entry: &MealEntry) -> DbResult<(Nutrition, f64)> {
+    // Get current nutrition and WW points from source
+    let (base_nutrition, base_ww) = if let Some(recipe_id) = entry.recipe_id {
         let recipe = Recipe::get_by_id(conn, recipe_id)?
             .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        recipe.cached_nutrition
+        let n = &recipe.cached_nutrition;
+        let ww = super::food_item::calculate_ww_points(n.calories, n.saturated_fat, n.sugar, n.protein);
+        (recipe.cached_nutrition, ww)
     } else if let Some(food_item_id) = entry.food_item_id {
         let food_item = FoodItem::get_by_id(conn, food_item_id)?
             .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
-        food_item.nutrition
+        let ww = if food_item.ww_zero_point { 0.0 } else { food_item.ww_points.unwrap_or(0.0) };
+        (food_item.nutrition, ww)
     } else {
-        return Ok(Nutrition::zero());
+        return Ok((Nutrition::zero(), 0.0));
     };
 
     // Scale by servings and percent eaten
-    let nutrition = base_nutrition.scale(entry.servings * (entry.percent_eaten / 100.0));
+    let scale = entry.servings * (entry.percent_eaten / 100.0);
+    let nutrition = base_nutrition.scale(scale);
+    let ww_points = base_ww * scale;
 
-    // Update the meal entry's cached nutrition
+    // Update the meal entry's cached nutrition and WW points
     conn.execute(
         r#"
         UPDATE meal_entries SET
@@ -534,8 +556,9 @@ fn refresh_meal_entry_nutrition(conn: &Connection, entry: &MealEntry) -> DbResul
             cached_sugar = ?7,
             cached_saturated_fat = ?8,
             cached_cholesterol = ?9,
+            cached_ww_points = ?10,
             updated_at = datetime('now')
-        WHERE id = ?10
+        WHERE id = ?11
         "#,
         params![
             nutrition.calories,
@@ -547,11 +570,12 @@ fn refresh_meal_entry_nutrition(conn: &Connection, entry: &MealEntry) -> DbResul
             nutrition.sugar,
             nutrition.saturated_fat,
             nutrition.cholesterol,
+            ww_points,
             entry.id,
         ],
     )?;
 
-    Ok(nutrition)
+    Ok((nutrition, ww_points))
 }
 
 /// Recalculate and update cached nutrition for a day
@@ -564,13 +588,38 @@ pub fn recalculate_day_nutrition(conn: &Connection, day_id: i64) -> DbResult<Nut
 
     // Refresh each meal entry from its source and sum
     let mut total = Nutrition::zero();
+    let mut total_ww_points = 0.0_f64;
     for entry in &entries {
-        let nutrition = refresh_meal_entry_nutrition(conn, entry)?;
+        let (nutrition, ww) = refresh_meal_entry_nutrition(conn, entry)?;
         total = total + nutrition;
+        total_ww_points += ww;
     }
 
     // Update day's cached nutrition
     Day::update_cached_nutrition(conn, day_id, &total)?;
+
+    // Update day's WW points (gross from food, exercise credit from exercises)
+    let exercise_credit: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(ww_activity_points), 0) FROM exercises WHERE day_id = ?1",
+        [day_id],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
+    conn.execute(
+        r#"
+        UPDATE days SET
+            cached_ww_points_gross = ?1,
+            cached_ww_exercise_credit = ?2,
+            cached_ww_points_net = ?3
+        WHERE id = ?4
+        "#,
+        params![
+            total_ww_points,
+            exercise_credit,
+            total_ww_points - exercise_credit,
+            day_id,
+        ],
+    )?;
 
     Ok(total)
 }

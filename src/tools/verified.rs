@@ -161,6 +161,7 @@ pub fn run_verified_pipeline(
             ml_per_serving: None,
             source: Some(normalized.source.clone()),
             source_detail: Some(normalized.source_detail.clone()),
+            ww_zero_point: None,
         };
 
         let result = food_items::add_food_item(db, create_data)

@@ -25,6 +25,11 @@ pub struct GetOrCreateDayResponse {
 pub struct DayDetail {
     pub id: i64,
     pub date: String,
+    pub ww_points_net: f64,
+    pub ww_points_gross: f64,
+    pub ww_exercise_credit: f64,
+    pub ww_budget: f64,
+    pub ww_tier: String,
     pub meals: DayMeals,
     pub exercises: Vec<DayExerciseSummary>,
     pub nutrition_total: Nutrition,
@@ -42,6 +47,7 @@ pub struct DayExerciseSummary {
     pub total_duration_minutes: f64,
     pub total_distance_miles: f64,
     pub calories_burned: f64,
+    pub ww_activity_points: f64,
     pub segment_count: usize,
     pub notes: Option<String>,
 }
@@ -61,6 +67,8 @@ pub struct DayMeals {
 pub struct DaySummary {
     pub id: i64,
     pub date: String,
+    pub ww_points_net: f64,
+    pub ww_tier: String,
     pub total_calories: f64,
     pub total_protein: f64,
     pub total_carbs: f64,
@@ -128,6 +136,21 @@ pub struct OrphanedDaySummary {
 pub struct ListOrphanedDaysResponse {
     pub days: Vec<OrphanedDaySummary>,
     pub count: usize,
+}
+
+/// Determine WW tier from net points and protein
+fn ww_tier(net_points: f64, protein: f64) -> &'static str {
+    if net_points <= 25.0 && protein >= 140.0 {
+        "MEGA Win"
+    } else if net_points <= 30.0 {
+        "Super Win"
+    } else if net_points <= 35.0 {
+        "Win"
+    } else if net_points <= 40.0 {
+        "Watch Zone"
+    } else {
+        "Red Alert"
+    }
 }
 
 // ============================================================================
@@ -207,6 +230,7 @@ pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
                     total_duration_minutes: e.cached_duration_minutes,
                     total_distance_miles: e.cached_distance_miles,
                     calories_burned: e.cached_calories_burned,
+                    ww_activity_points: e.ww_activity_points,
                     segment_count: segments.len(),
                     notes: e.notes,
                 });
@@ -221,9 +245,23 @@ pub fn get_day(db: &Database, date: &str) -> Result<Option<DayDetail>, String> {
 
             let net_calories = day.cached_nutrition.calories - calories_burned;
 
+            // WW points from day cache
+            let (ww_gross, ww_credit, ww_net) = conn.query_row(
+                "SELECT COALESCE(cached_ww_points_gross, 0), COALESCE(cached_ww_exercise_credit, 0), COALESCE(cached_ww_points_net, 0) FROM days WHERE id = ?1",
+                [day.id],
+                |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)),
+            ).unwrap_or((0.0, 0.0, 0.0));
+
+            let tier = ww_tier(ww_net, day.cached_nutrition.protein);
+
             Ok(Some(DayDetail {
                 id: day.id,
                 date: day.date,
+                ww_points_net: ww_net,
+                ww_points_gross: ww_gross,
+                ww_exercise_credit: ww_credit,
+                ww_budget: 35.0,
+                ww_tier: tier.to_string(),
                 meals,
                 exercises,
                 nutrition_total: day.cached_nutrition,
@@ -260,9 +298,19 @@ pub fn list_days(
         let entries = MealEntry::get_for_day(&conn, day.id)
             .map_err(|e| format!("Failed to get meal entries: {}", e))?;
 
+        // Get WW net points for this day
+        let ww_net: f64 = conn.query_row(
+            "SELECT COALESCE(cached_ww_points_net, 0) FROM days WHERE id = ?1",
+            [day.id],
+            |row| row.get(0),
+        ).unwrap_or(0.0);
+        let tier = ww_tier(ww_net, day.cached_nutrition.protein);
+
         summaries.push(DaySummary {
             id: day.id,
             date: day.date,
+            ww_points_net: ww_net,
+            ww_tier: tier.to_string(),
             total_calories: day.cached_nutrition.calories,
             total_protein: day.cached_nutrition.protein,
             total_carbs: day.cached_nutrition.carbs,

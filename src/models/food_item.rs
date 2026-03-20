@@ -58,6 +58,10 @@ pub struct FoodItem {
     pub source: Option<String>,
     /// Free-text provenance details (USDA FDC ID, photo description, etc.)
     pub source_detail: Option<String>,
+    /// Weight Watchers points per serving (calculated from formula)
+    pub ww_points: Option<f64>,
+    /// Whether this is a WW ZeroPoint food (always scores 0)
+    pub ww_zero_point: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -96,6 +100,9 @@ pub struct FoodItemCreate {
     pub source: Option<String>,
     /// Free-text provenance details
     pub source_detail: Option<String>,
+    /// Override WW ZeroPoint flag (auto-detected if not provided)
+    #[serde(default)]
+    pub ww_zero_point: Option<bool>,
 }
 
 /// Data for updating a food item
@@ -126,6 +133,16 @@ pub struct FoodItemUpdate {
     pub source: Option<String>,
     /// Update provenance details
     pub source_detail: Option<String>,
+    /// Update WW ZeroPoint flag
+    pub ww_zero_point: Option<bool>,
+}
+
+/// Calculate WW SmartPoints from nutrition values
+/// Formula: (cal × 0.0305) + (sat_fat × 0.275) + (sugar × 0.12) − (protein × 0.098)
+/// Rounded to nearest integer, floor at 0
+pub fn calculate_ww_points(calories: f64, saturated_fat: f64, sugar: f64, protein: f64) -> f64 {
+    let raw = (calories * 0.0305) + (saturated_fat * 0.275) + (sugar * 0.12) - (protein * 0.098);
+    raw.round().max(0.0)
 }
 
 impl FoodItem {
@@ -160,6 +177,8 @@ impl FoodItem {
             ml_per_serving: row.get("ml_per_serving")?,
             source: row.get("source")?,
             source_detail: row.get("source_detail")?,
+            ww_points: row.get("ww_points")?,
+            ww_zero_point: row.get::<_, i32>("ww_zero_point").unwrap_or(0) != 0,
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -182,14 +201,22 @@ impl FoodItem {
             .ml_per_serving
             .or_else(|| calculate_ml_per_serving(data.serving_size, &data.serving_unit));
 
+        // Calculate WW points
+        let ww_zero_point = data.ww_zero_point.unwrap_or(false);
+        let ww_points = if ww_zero_point {
+            0.0
+        } else {
+            calculate_ww_points(data.calories, data.saturated_fat, data.sugar, data.protein)
+        };
+
         conn.execute(
             r#"
             INSERT INTO food_items (
                 name, brand, serving_size, serving_unit,
                 calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol,
                 preference, notes, base_unit_type, grams_per_serving, ml_per_serving,
-                source, source_detail
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                source, source_detail, ww_points, ww_zero_point
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
             "#,
             params![
                 data.name,
@@ -212,6 +239,8 @@ impl FoodItem {
                 ml_per_serving,
                 data.source,
                 data.source_detail,
+                ww_points,
+                ww_zero_point as i32,
             ],
         )?;
 
@@ -422,6 +451,26 @@ impl FoodItem {
             let calculated = calculate_ml_per_serving(serving_size, serving_unit);
             updates.push(format!("ml_per_serving = ?{}", params_vec.len() + 1));
             params_vec.push(Box::new(calculated));
+        }
+
+        // WW zero_point flag
+        if let Some(zp) = data.ww_zero_point {
+            updates.push(format!("ww_zero_point = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(zp as i32));
+        }
+
+        // Recalculate WW points if any nutrition field changed or zero_point flag changed
+        let nutrition_changed = data.calories.is_some() || data.saturated_fat.is_some()
+            || data.sugar.is_some() || data.protein.is_some() || data.ww_zero_point.is_some();
+        if nutrition_changed {
+            let is_zero = data.ww_zero_point.unwrap_or(current.ww_zero_point);
+            let cal = data.calories.unwrap_or(current.nutrition.calories);
+            let sf = data.saturated_fat.unwrap_or(current.nutrition.saturated_fat);
+            let sug = data.sugar.unwrap_or(current.nutrition.sugar);
+            let pro = data.protein.unwrap_or(current.nutrition.protein);
+            let ww = if is_zero { 0.0 } else { calculate_ww_points(cal, sf, sug, pro) };
+            updates.push(format!("ww_points = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(ww));
         }
 
         if updates.is_empty() {

@@ -76,6 +76,7 @@ pub struct Exercise {
     pub cached_duration_minutes: f64,
     pub cached_distance_miles: f64,
     pub cached_calories_burned: f64,
+    pub ww_activity_points: f64,
     pub pre_vital_group_id: Option<i64>,
     pub post_vital_group_id: Option<i64>,
     pub notes: Option<String>,
@@ -118,6 +119,7 @@ impl Exercise {
             cached_duration_minutes: row.get("cached_duration_minutes")?,
             cached_distance_miles: row.get("cached_distance_miles")?,
             cached_calories_burned: row.get("cached_calories_burned")?,
+            ww_activity_points: row.get("ww_activity_points").unwrap_or(0.0),
             pre_vital_group_id: row.get("pre_vital_group_id")?,
             post_vital_group_id: row.get("post_vital_group_id")?,
             notes: row.get("notes")?,
@@ -289,16 +291,21 @@ impl Exercise {
             .map(|s| s.calories_burned)
             .sum();
 
+        // WW Activity Points: weight_lbs × duration_min × 0.00047, capped at 6 per session
+        let weight_lbs = get_latest_weight(conn)?.unwrap_or(150.0);
+        let ww_activity = (weight_lbs * total_duration * 0.00047).min(6.0).max(0.0);
+
         conn.execute(
             r#"
             UPDATE exercises
             SET cached_duration_minutes = ?1,
                 cached_distance_miles = ?2,
                 cached_calories_burned = ?3,
+                ww_activity_points = ?4,
                 updated_at = datetime('now')
-            WHERE id = ?4
+            WHERE id = ?5
             "#,
-            params![total_duration, total_distance, total_calories, id],
+            params![total_duration, total_distance, total_calories, ww_activity, id],
         )?;
 
         // Also update the day's total calories burned
@@ -713,7 +720,7 @@ fn calculate_calories_burned(
     (calories * 10.0).round() / 10.0
 }
 
-/// Recalculate total calories burned for a day
+/// Recalculate total calories burned and WW exercise credit for a day
 pub fn recalculate_day_exercise_calories(conn: &Connection, day_id: i64) -> DbResult<f64> {
     let total: f64 = conn.query_row(
         "SELECT COALESCE(SUM(cached_calories_burned), 0) FROM exercises WHERE day_id = ?1",
@@ -721,9 +728,26 @@ pub fn recalculate_day_exercise_calories(conn: &Connection, day_id: i64) -> DbRe
         |row| row.get(0),
     )?;
 
+    let ww_credit: f64 = conn.query_row(
+        "SELECT COALESCE(SUM(ww_activity_points), 0) FROM exercises WHERE day_id = ?1",
+        [day_id],
+        |row| row.get(0),
+    )?;
+
+    let ww_gross: f64 = conn.query_row(
+        "SELECT COALESCE(cached_ww_points_gross, 0) FROM days WHERE id = ?1",
+        [day_id],
+        |row| row.get(0),
+    ).unwrap_or(0.0);
+
     conn.execute(
-        "UPDATE days SET cached_calories_burned = ?1, updated_at = datetime('now') WHERE id = ?2",
-        params![total, day_id],
+        r#"UPDATE days SET
+            cached_calories_burned = ?1,
+            cached_ww_exercise_credit = ?2,
+            cached_ww_points_net = ?3,
+            updated_at = datetime('now')
+        WHERE id = ?4"#,
+        params![total, ww_credit, ww_gross - ww_credit, day_id],
     )?;
 
     Ok(total)
