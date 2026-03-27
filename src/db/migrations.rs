@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -98,6 +98,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 14 {
         migrate_v14(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (14)", [])?;
+    }
+
+    if current_version < 15 {
+        migrate_v15(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (15)", [])?;
     }
 
     Ok(())
@@ -1171,6 +1176,57 @@ fn repair_scoop_meal_entries(conn: &Connection) -> DbResult<()> {
             affected_day_ids.len()
         );
     }
+
+    Ok(())
+}
+
+/// Migration v15: Remove WW exercise activity points cap
+///
+/// The 6-point cap on ww_activity_points created a perverse incentive where
+/// a 40-minute walk and a 63-minute 5K both earned 6 points. Exercise credit
+/// now scales linearly with effort: weight_lbs × duration_min × 0.00047.
+///
+/// Recalculates all exercise sessions and cascades to day WW totals.
+fn migrate_v15(conn: &Connection) -> DbResult<()> {
+    // Get latest weight for the formula
+    let weight_lbs: f64 = conn.query_row(
+        "SELECT value1 FROM vitals WHERE vital_type = 'weight' ORDER BY timestamp DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(310.0); // Fallback if no weight recorded
+
+    // Recalculate all exercise ww_activity_points without the cap
+    conn.execute(
+        "UPDATE exercises SET ww_activity_points = MAX(cached_duration_minutes * ?1 * 0.00047, 0.0)",
+        params![weight_lbs],
+    )?;
+
+    // Recalculate day WW totals for all days that have exercises
+    conn.execute_batch(
+        r#"
+        UPDATE days SET
+            cached_ww_exercise_credit = COALESCE((
+                SELECT SUM(ww_activity_points) FROM exercises WHERE exercises.day_id = days.id
+            ), 0),
+            cached_ww_points_net = cached_ww_points_gross - COALESCE((
+                SELECT SUM(ww_activity_points) FROM exercises WHERE exercises.day_id = days.id
+            ), 0)
+        WHERE id IN (SELECT DISTINCT day_id FROM exercises)
+        "#,
+    )?;
+
+    // Count affected for logging
+    let exercises_updated: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM exercises", [], |row| row.get(0),
+    ).unwrap_or(0);
+    let days_updated: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT day_id) FROM exercises", [], |row| row.get(0),
+    ).unwrap_or(0);
+
+    eprintln!(
+        "[migrate_v15] WW exercise cap removed: recalculated {} exercises across {} days (weight: {:.1} lbs)",
+        exercises_updated, days_updated, weight_lbs
+    );
 
     Ok(())
 }

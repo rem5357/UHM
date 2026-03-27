@@ -291,9 +291,9 @@ impl Exercise {
             .map(|s| s.calories_burned)
             .sum();
 
-        // WW Activity Points: weight_lbs × duration_min × 0.00047, capped at 6 per session
+        // WW Activity Points: weight_lbs × duration_min × 0.00047 (uncapped — linear with effort)
         let weight_lbs = get_latest_weight(conn)?.unwrap_or(150.0);
-        let ww_activity = (weight_lbs * total_duration * 0.00047).min(6.0).max(0.0);
+        let ww_activity = (weight_lbs * total_duration * 0.00047).max(0.0);
 
         conn.execute(
             r#"
