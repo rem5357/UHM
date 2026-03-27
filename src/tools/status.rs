@@ -1063,6 +1063,15 @@ points on future updates.
 ### Priority 3: No community data available
 Fall back to formula calculation (default behavior). Leave both fields unset.
 
+## Scoop Support for Powder/Granular Items
+
+For items measured by scoop (protein powder, PBfit, etc.), set `scoop_grams` to the
+tared weight of one level scoop in grams. This allows logging with unit="scoop" in
+log_meal_items_batch, which auto-converts: quantity_grams = num_scoops × scoop_grams.
+
+Only set scoop_grams when you have an actual tared measurement — do NOT estimate.
+Items without scoop_grams will treat "scoop" as a serving (fallback).
+
 ## Checklist Before Calling add_food_item
 
 1. ✓ serving_size is 100 (for g/ml) or 1 (for count)
@@ -1072,6 +1081,7 @@ Fall back to formula calculation (default behavior). Leave both fields unset.
 5. ✓ Sodium is in mg (not g)
 6. ✓ Cholesterol is in mg (not g)
 7. ✓ For community WW items: ww_source = "community" and ww_points_override set
+8. ✓ For powder/granular items with known scoop weight: scoop_grams set from tared measurement
 "#;
 
 /// Runtime status of the UHM service

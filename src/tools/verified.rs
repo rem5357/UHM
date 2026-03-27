@@ -164,6 +164,7 @@ pub fn run_verified_pipeline(
             ww_zero_point: None,
             ww_source: None,
             ww_points_override: None,
+            scoop_grams: None,
         };
 
         let result = food_items::add_food_item(db, create_data)

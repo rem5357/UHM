@@ -2,12 +2,12 @@
 //!
 //! Schema creation and migration logic.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -93,6 +93,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 13 {
         migrate_v13(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (13)", [])?;
+    }
+
+    if current_version < 14 {
+        migrate_v14(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (14)", [])?;
     }
 
     Ok(())
@@ -912,6 +917,260 @@ fn migrate_v13(conn: &Connection) -> DbResult<()> {
         ALTER TABLE food_items ADD COLUMN ww_source TEXT DEFAULT 'formula';
         "#,
     )?;
+
+    Ok(())
+}
+
+/// Migration v14: Add scoop_grams to food_items + historical data repair
+///
+/// 1. Adds scoop_grams column for powder/granular items
+/// 2. Sets known scoop weights from tared measurements (2026-03-22)
+/// 3. Repairs historical meal entries that used wrong scoop→gram conversions
+fn migrate_v14(conn: &Connection) -> DbResult<()> {
+    conn.execute_batch(
+        r#"
+        -- Add scoop_grams: how many grams one scoop of this item weighs
+        -- Only relevant for powder/granular items (protein powder, PBfit, etc.)
+        ALTER TABLE food_items ADD COLUMN scoop_grams REAL;
+        "#,
+    )?;
+
+    // Set scoop_grams for known items (tared measurements 2026-03-22)
+    conn.execute("UPDATE food_items SET scoop_grams = 36.0 WHERE id = 289", [])?; // Naked Whey Chocolate
+    conn.execute("UPDATE food_items SET scoop_grams = 31.0 WHERE id = 31", [])?;  // Naked Whey ISO Unflavored
+    conn.execute("UPDATE food_items SET scoop_grams = 29.0 WHERE id = 30", [])?;  // ON Gold Standard Chocolate
+    conn.execute("UPDATE food_items SET scoop_grams = 32.0 WHERE id = 52", [])?;  // PBfit Peanut Butter Powder
+
+    // Historical data repair: fix meal entries with wrong scoop→gram conversions
+    repair_scoop_meal_entries(conn)?;
+
+    Ok(())
+}
+
+/// Parse number of scoops from a notes string.
+/// Looks for patterns like "2 scoops", "1 scoop", "2 scoops Naked Whey", etc.
+fn parse_scoop_count(notes: &str) -> Option<f64> {
+    let lower = notes.to_lowercase();
+
+    // Look for "N scoop" or "N scoops" patterns
+    for word_pair in lower.split_whitespace().collect::<Vec<&str>>().windows(2) {
+        if word_pair[1].starts_with("scoop") {
+            if let Ok(n) = word_pair[0].parse::<f64>() {
+                if n > 0.0 && n <= 20.0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+
+    // Also check for standalone "scoop" (implies 1 scoop)
+    if lower.contains("scoop") && !lower.contains("scoops") {
+        // Only if no number was found above, check if it's "a scoop" or just "scoop"
+        let words: Vec<&str> = lower.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            if w.starts_with("scoop") {
+                if i > 0 && (words[i - 1] == "a" || words[i - 1] == "one") {
+                    return Some(1.0);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Repair meal entries where scoop-to-gram conversion was wrong.
+///
+/// For each affected meal entry:
+/// 1. Parse scoop count from notes
+/// 2. Recalculate servings = (scoops × scoop_grams) / serving_size
+/// 3. Update quantity to correct gram value
+/// 4. Recalculate cached nutrition and WW points
+/// 5. Recalculate day nutrition for all affected days
+fn repair_scoop_meal_entries(conn: &Connection) -> DbResult<()> {
+    // Food items with known scoop_grams and their correct values
+    let scoop_items: Vec<(i64, f64)> = vec![
+        (289, 36.0), // Naked Whey Chocolate
+        (31, 31.0),  // Naked Whey ISO Unflavored
+        (30, 29.0),  // ON Gold Standard Chocolate
+        (52, 32.0),  // PBfit Peanut Butter Powder
+    ];
+
+    let mut affected_day_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut entries_fixed = 0_i64;
+
+    for (food_item_id, scoop_grams) in &scoop_items {
+        // Get the food item's nutrition and serving info
+        let food_row = conn.query_row(
+            "SELECT serving_size, calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol, ww_points, ww_zero_point FROM food_items WHERE id = ?1",
+            [food_item_id],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,  // serving_size
+                    row.get::<_, f64>(1)?,  // calories
+                    row.get::<_, f64>(2)?,  // protein
+                    row.get::<_, f64>(3)?,  // carbs
+                    row.get::<_, f64>(4)?,  // fat
+                    row.get::<_, f64>(5)?,  // fiber
+                    row.get::<_, f64>(6)?,  // sodium
+                    row.get::<_, f64>(7)?,  // sugar
+                    row.get::<_, f64>(8)?,  // saturated_fat
+                    row.get::<_, f64>(9)?,  // cholesterol
+                    row.get::<_, Option<f64>>(10)?, // ww_points
+                    row.get::<_, i32>(11)?, // ww_zero_point
+                ))
+            },
+        );
+
+        let food = match food_row {
+            Ok(f) => f,
+            Err(_) => continue, // Food item doesn't exist, skip
+        };
+
+        let (serving_size, cal, pro, carbs, fat, fiber, sodium, sugar, sat_fat, chol, ww_points, ww_zero) = food;
+        let base_ww = if ww_zero != 0 { 0.0 } else { ww_points.unwrap_or(0.0) };
+
+        // Find all 2026 meal entries for this food item that mention scoops
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT me.id, me.day_id, me.servings, me.percent_eaten, me.notes, me.quantity, me.unit
+            FROM meal_entries me
+            JOIN days d ON me.day_id = d.id
+            WHERE me.food_item_id = ?1
+                AND d.date >= '2026-01-01'
+                AND d.date <= '2026-12-31'
+                AND me.notes IS NOT NULL
+                AND (me.notes LIKE '%scoop%' OR me.notes LIKE '%Scoop%')
+            "#,
+        )?;
+
+        let entries: Vec<(i64, i64, f64, f64, String, Option<f64>, Option<String>)> = stmt.query_map(
+            [food_item_id],
+            |row| Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, String>(4)?,
+                row.get(5)?,
+                row.get(6)?,
+            )),
+        )?.filter_map(|r| r.ok()).collect();
+
+        for (entry_id, day_id, _old_servings, percent_eaten, notes, _old_quantity, _old_unit) in &entries {
+            if let Some(num_scoops) = parse_scoop_count(notes) {
+                let total_grams = num_scoops * scoop_grams;
+                let new_servings = total_grams / serving_size;
+                let scale = new_servings * (*percent_eaten / 100.0);
+
+                // Recalculate cached nutrition
+                conn.execute(
+                    r#"
+                    UPDATE meal_entries SET
+                        servings = ?1,
+                        quantity = ?2,
+                        unit = 'scoop',
+                        cached_calories = ?3,
+                        cached_protein = ?4,
+                        cached_carbs = ?5,
+                        cached_fat = ?6,
+                        cached_fiber = ?7,
+                        cached_sodium = ?8,
+                        cached_sugar = ?9,
+                        cached_saturated_fat = ?10,
+                        cached_cholesterol = ?11,
+                        cached_ww_points = ?12,
+                        updated_at = datetime('now')
+                    WHERE id = ?13
+                    "#,
+                    params![
+                        new_servings,
+                        num_scoops,
+                        cal * scale,
+                        pro * scale,
+                        carbs * scale,
+                        fat * scale,
+                        fiber * scale,
+                        sodium * scale,
+                        sugar * scale,
+                        sat_fat * scale,
+                        chol * scale,
+                        base_ww * scale,
+                        entry_id,
+                    ],
+                )?;
+
+                affected_day_ids.insert(*day_id);
+                entries_fixed += 1;
+            }
+        }
+    }
+
+    // Recalculate day nutrition and WW points for all affected days
+    for day_id in &affected_day_ids {
+        // Sum up all meal entry nutrition for this day
+        let (total_cal, total_pro, total_carbs, total_fat, total_fiber,
+             total_sodium, total_sugar, total_sat_fat, total_chol, total_ww): (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) = conn.query_row(
+            r#"
+            SELECT
+                COALESCE(SUM(cached_calories), 0),
+                COALESCE(SUM(cached_protein), 0),
+                COALESCE(SUM(cached_carbs), 0),
+                COALESCE(SUM(cached_fat), 0),
+                COALESCE(SUM(cached_fiber), 0),
+                COALESCE(SUM(cached_sodium), 0),
+                COALESCE(SUM(cached_sugar), 0),
+                COALESCE(SUM(cached_saturated_fat), 0),
+                COALESCE(SUM(cached_cholesterol), 0),
+                COALESCE(SUM(cached_ww_points), 0)
+            FROM meal_entries WHERE day_id = ?1
+            "#,
+            [day_id],
+            |row| Ok((
+                row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+            )),
+        )?;
+
+        // Update day cached nutrition
+        conn.execute(
+            r#"
+            UPDATE days SET
+                cached_calories = ?1, cached_protein = ?2, cached_carbs = ?3,
+                cached_fat = ?4, cached_fiber = ?5, cached_sodium = ?6,
+                cached_sugar = ?7, cached_saturated_fat = ?8, cached_cholesterol = ?9
+            WHERE id = ?10
+            "#,
+            params![total_cal, total_pro, total_carbs, total_fat, total_fiber,
+                    total_sodium, total_sugar, total_sat_fat, total_chol, day_id],
+        )?;
+
+        // Update day WW points
+        let exercise_credit: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(ww_activity_points), 0) FROM exercises WHERE day_id = ?1",
+            [day_id],
+            |row| row.get(0),
+        ).unwrap_or(0.0);
+
+        conn.execute(
+            r#"
+            UPDATE days SET
+                cached_ww_points_gross = ?1,
+                cached_ww_exercise_credit = ?2,
+                cached_ww_points_net = ?3
+            WHERE id = ?4
+            "#,
+            params![total_ww, exercise_credit, total_ww - exercise_credit, day_id],
+        )?;
+    }
+
+    if entries_fixed > 0 {
+        eprintln!(
+            "[migrate_v14] Scoop repair: fixed {} meal entries across {} days",
+            entries_fixed,
+            affected_day_ids.len()
+        );
+    }
 
     Ok(())
 }

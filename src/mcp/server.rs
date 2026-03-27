@@ -117,6 +117,8 @@ pub struct AddFoodItemParams {
     pub ww_source: Option<String>,
     /// Manual WW points value (used when ww_source = "community")
     pub ww_points_override: Option<f64>,
+    /// Grams per scoop for powder/granular items (e.g., 36.0 for protein powder)
+    pub scoop_grams: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -176,6 +178,8 @@ pub struct UpdateFoodItemParams {
     pub ww_source: Option<String>,
     /// Manual WW points override (used when ww_source = "community")
     pub ww_points_override: Option<f64>,
+    /// Grams per scoop for powder/granular items (e.g., 36.0 for protein powder)
+    pub scoop_grams: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -508,9 +512,9 @@ pub struct AddFoodItemVerifiedParams {
 pub struct BatchMealItemParam {
     /// Food item ID
     pub food_item_id: i64,
-    /// Quantity in g/ml/count
+    /// Quantity in g/ml/count/scoops
     pub quantity: f64,
-    /// Unit: g, ml, or count
+    /// Unit: g, ml, count, or scoop (scoop requires scoop_grams set on the food item)
     pub unit: String,
     /// Percentage eaten (0-100, default 100)
     #[serde(default = "default_percent_eaten")]
@@ -1098,6 +1102,7 @@ impl UhmService {
             source: p.source, source_detail: p.source_detail,
             ww_zero_point: None,
             ww_source: p.ww_source, ww_points_override: p.ww_points_override,
+            scoop_grams: p.scoop_grams,
         };
         let result = food_items::add_food_item(&self.database, data).map_err(|e| McpError::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&result).map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1148,6 +1153,7 @@ impl UhmService {
             source: p.source, source_detail: p.source_detail,
             ww_zero_point: None,
             ww_source: p.ww_source, ww_points_override: p.ww_points_override,
+            scoop_grams: p.scoop_grams,
         };
 
         // Check if batch mode is active

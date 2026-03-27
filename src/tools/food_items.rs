@@ -80,6 +80,8 @@ pub struct FoodItemDetail {
     pub source: Option<String>,
     /// Free-text provenance details
     pub source_detail: Option<String>,
+    /// Grams per scoop for powder/granular items
+    pub scoop_grams: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
     pub recipe_usage_count: i64,
@@ -118,6 +120,7 @@ impl FoodItemDetail {
             ml_per_serving: item.ml_per_serving,
             source: item.source,
             source_detail: item.source_detail,
+            scoop_grams: item.scoop_grams,
             created_at: item.created_at,
             updated_at: item.updated_at,
             recipe_usage_count,

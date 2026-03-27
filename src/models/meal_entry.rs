@@ -660,6 +660,20 @@ pub fn calculate_direct_log_multiplier(quantity: f64, unit: &str, food_item: &Fo
             }
             quantity / food_item.serving_size
         }
+        "scoop" | "scoops" => {
+            // Scoop-based: convert scoops to grams using food_item.scoop_grams
+            if let Some(scoop_grams) = food_item.scoop_grams {
+                let total_grams = quantity * scoop_grams;
+                let grams_per_serving = food_item.grams_per_serving.unwrap_or(food_item.serving_size);
+                if grams_per_serving <= 0.0 {
+                    return quantity; // Fallback: treat each scoop as one serving
+                }
+                total_grams / grams_per_serving
+            } else {
+                // No scoop_grams set — treat as servings (fallback)
+                quantity
+            }
+        }
         "servings" | "serving" => {
             // Direct servings (backwards compatible)
             quantity

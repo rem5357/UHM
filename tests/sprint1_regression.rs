@@ -110,6 +110,12 @@ fn make_food_item_create(name: &str, serving_size: f64, calories: f64) -> FoodIt
         base_unit_type: None,
         grams_per_serving: None,
         ml_per_serving: None,
+        source: None,
+        source_detail: None,
+        ww_zero_point: None,
+        ww_source: None,
+        ww_points_override: None,
+        scoop_grams: None,
     }
 }
 
@@ -197,6 +203,12 @@ fn test_direct_log_multiplier_zero_serving_size_no_nan() {
         base_unit_type: None,
         grams_per_serving: None, // Falls back to serving_size (0.0)
         ml_per_serving: None,
+        source: None,
+        source_detail: None,
+        ww_points: None,
+        ww_zero_point: false,
+        ww_source: None,
+        scoop_grams: None,
         created_at: String::new(),
         updated_at: String::new(),
     };
@@ -231,6 +243,12 @@ fn test_direct_log_multiplier_normal_case_still_works() {
         base_unit_type: None,
         grams_per_serving: Some(100.0),
         ml_per_serving: None,
+        source: None,
+        source_detail: None,
+        ww_points: None,
+        ww_zero_point: false,
+        ww_source: None,
+        scoop_grams: None,
         created_at: String::new(),
         updated_at: String::new(),
     };

@@ -64,6 +64,8 @@ pub struct FoodItem {
     pub ww_zero_point: bool,
     /// Source of WW points: "formula" (auto-calculated) or "community" (manually set from WW community data)
     pub ww_source: Option<String>,
+    /// Grams per scoop for powder/granular items (e.g., protein powder)
+    pub scoop_grams: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -111,6 +113,9 @@ pub struct FoodItemCreate {
     /// Manual WW points override (used when ww_source = "community")
     #[serde(default)]
     pub ww_points_override: Option<f64>,
+    /// Grams per scoop for powder/granular items
+    #[serde(default)]
+    pub scoop_grams: Option<f64>,
 }
 
 /// Data for updating a food item
@@ -147,6 +152,8 @@ pub struct FoodItemUpdate {
     pub ww_source: Option<String>,
     /// Manual WW points override (used when ww_source = "community")
     pub ww_points_override: Option<f64>,
+    /// Grams per scoop for powder/granular items (set to Some to update, None to skip)
+    pub scoop_grams: Option<f64>,
 }
 
 /// Calculate WW SmartPoints from nutrition values
@@ -192,6 +199,7 @@ impl FoodItem {
             ww_points: row.get("ww_points")?,
             ww_zero_point: row.get::<_, i32>("ww_zero_point").unwrap_or(0) != 0,
             ww_source: row.get("ww_source").ok(),
+            scoop_grams: row.get("scoop_grams").ok().flatten(),
             created_at: row.get("created_at")?,
             updated_at: row.get("updated_at")?,
         })
@@ -233,8 +241,8 @@ impl FoodItem {
                 name, brand, serving_size, serving_unit,
                 calories, protein, carbs, fat, fiber, sodium, sugar, saturated_fat, cholesterol,
                 preference, notes, base_unit_type, grams_per_serving, ml_per_serving,
-                source, source_detail, ww_points, ww_zero_point, ww_source
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+                source, source_detail, ww_points, ww_zero_point, ww_source, scoop_grams
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
             "#,
             params![
                 data.name,
@@ -260,6 +268,7 @@ impl FoodItem {
                 ww_points,
                 ww_zero_point as i32,
                 ww_source,
+                data.scoop_grams,
             ],
         )?;
 
@@ -470,6 +479,12 @@ impl FoodItem {
             let calculated = calculate_ml_per_serving(serving_size, serving_unit);
             updates.push(format!("ml_per_serving = ?{}", params_vec.len() + 1));
             params_vec.push(Box::new(calculated));
+        }
+
+        // scoop_grams
+        if let Some(sg) = data.scoop_grams {
+            updates.push(format!("scoop_grams = ?{}", params_vec.len() + 1));
+            params_vec.push(Box::new(sg));
         }
 
         // WW zero_point flag
