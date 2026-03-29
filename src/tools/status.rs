@@ -726,7 +726,7 @@ This guide explains how to track exercise using the Universal Health Manager (UH
 
 ## Overview
 
-The exercise system tracks **treadmill workouts** (expandable to other types in the future). Each exercise session:
+The exercise system tracks **treadmill** and **Bowflex Max Trainer** workouts. Each exercise session:
 - Belongs to a **Day** (same as meal logging)
 - Contains one or more **Segments** (e.g., 15 min at 2.3 mph, then 15 min at 2.5 mph)
 - Automatically calculates **calories burned** using current weight from vitals
@@ -738,13 +738,18 @@ The exercise system tracks **treadmill workouts** (expandable to other types in 
 An exercise session represents a single workout (e.g., one trip to the gym or one treadmill session).
 
 ### Segments
-Each session can have multiple segments with different settings:
-- **Duration** (minutes)
-- **Speed** (mph)
-- **Distance** (miles)
+Each session can have multiple segments with different settings.
+
+**Treadmill segments:**
+- **Duration** (minutes), **Speed** (mph), **Distance** (miles) — provide 2 of 3
 - **Incline** (percent)
 
-**Important:** You must provide at least 2 of 3 values (duration, speed, distance). The system calculates the third automatically.
+**Bowflex Max Trainer segments:**
+- **Duration** (minutes) — required
+- **Setting** (1-20, passed via speed_mph) — required
+- Distance is always 0, incline is not used
+
+**Treadmill:** You must provide at least 2 of 3 values (duration, speed, distance). The system calculates the third automatically.
 
 ### Automatic Calculations
 - **Third value:** Given 2 of (duration, speed, distance), the 3rd is calculated
@@ -771,6 +776,22 @@ MET values vary by speed:
 | 6.0 | 9.0 |
 
 Incline adds ~0.1 MET per 1% grade.
+
+### Bowflex Max Trainer Calorie Calculation
+Uses: `Cal/min = MET × 3.5 × weight_kg / 200`
+
+Setting-to-MET lookup:
+| Setting Range | MET | Description |
+|---|---|---|
+| 1-4 | 5.0 | Light — elliptical moderate effort |
+| 5-8 | 6.5 | Moderate — stair-stepper moderate/vigorous |
+| 9-12 | 8.0 | Hard — elliptical vigorous effort |
+| 13-20 | 10.0 | Max — stair-climbing fast |
+
+### WW Activity Points
+Formula: `weight_lbs × duration_min × 0.00047 × multiplier`
+- Treadmill multiplier: 1.0x
+- Bowflex multiplier: 1.5x (full-body resistance exercise)
 
 ## Step-by-Step Workflow
 
@@ -875,6 +896,12 @@ add_exercise(date: "2026-01-14", exercise_type: "treadmill")
 add_exercise_segment(exercise_id: 1, duration_minutes: 30, speed_mph: 3.0)
 ```
 
+### Bowflex Max Trainer Session
+```
+add_exercise(date: "2026-03-29", exercise_type: "bowflex")
+add_exercise_segment(exercise_id: 2, duration_minutes: 2, speed_mph: 5, notes: "Setting 5")
+```
+
 ### Multi-Segment Interval Training
 ```
 add_exercise(date: "2026-01-14", exercise_type: "treadmill", notes: "Interval training")
@@ -903,9 +930,8 @@ Each includes: count, average, median, mode, SD, min, max, percentiles, outliers
 ## Input Validation
 
 ### Segment Requirements
-- **Must provide 2 of 3:** duration_minutes, speed_mph, distance_miles
-- System calculates the missing value
-- If all 3 provided, system checks consistency (1% tolerance)
+- **Treadmill:** Must provide 2 of 3 (duration_minutes, speed_mph, distance_miles). System calculates the missing value. If all 3, checks consistency (1% tolerance).
+- **Bowflex:** Must provide duration_minutes + speed_mph (setting 1-20). Distance auto-set to 0.
 
 ### Consistency Flag
 If values don't match (e.g., 30 min at 3 mph but distance says 2 miles instead of 1.5):

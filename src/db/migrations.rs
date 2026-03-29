@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 15;
+const SCHEMA_VERSION: i32 = 16;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -103,6 +103,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 15 {
         migrate_v15(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (15)", [])?;
+    }
+
+    if current_version < 16 {
+        migrate_v16(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (16)", [])?;
     }
 
     Ok(())
@@ -1227,6 +1232,48 @@ fn migrate_v15(conn: &Connection) -> DbResult<()> {
         "[migrate_v15] WW exercise cap removed: recalculated {} exercises across {} days (weight: {:.1} lbs)",
         exercises_updated, days_updated, weight_lbs
     );
+
+    Ok(())
+}
+
+/// Migration v16: Add bowflex exercise type
+fn migrate_v16(conn: &Connection) -> DbResult<()> {
+    // SQLite cannot ALTER CHECK constraints, so recreate the exercises table
+    conn.execute_batch(
+        r#"
+        -- Create new table with updated CHECK constraint
+        CREATE TABLE exercises_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_id INTEGER NOT NULL REFERENCES days(id) ON DELETE CASCADE,
+            exercise_type TEXT NOT NULL CHECK(exercise_type IN ('treadmill', 'bowflex')),
+            timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+            cached_duration_minutes REAL NOT NULL DEFAULT 0,
+            cached_distance_miles REAL NOT NULL DEFAULT 0,
+            cached_calories_burned REAL NOT NULL DEFAULT 0,
+            ww_activity_points REAL NOT NULL DEFAULT 0,
+            pre_vital_group_id INTEGER REFERENCES vital_groups(id),
+            post_vital_group_id INTEGER REFERENCES vital_groups(id),
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- Copy all existing data
+        INSERT INTO exercises_new
+            SELECT * FROM exercises;
+
+        -- Drop old table and rename
+        DROP TABLE exercises;
+        ALTER TABLE exercises_new RENAME TO exercises;
+
+        -- Recreate indexes
+        CREATE INDEX idx_exercises_day ON exercises(day_id);
+        CREATE INDEX idx_exercises_type ON exercises(exercise_type);
+        CREATE INDEX idx_exercises_timestamp ON exercises(timestamp);
+        "#,
+    )?;
+
+    eprintln!("[migrate_v16] Added bowflex exercise type to CHECK constraint");
 
     Ok(())
 }

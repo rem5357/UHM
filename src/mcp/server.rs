@@ -944,7 +944,7 @@ pub struct GenerateDaySummaryParams {
 pub struct AddExerciseParams {
     /// Date in ISO format (YYYY-MM-DD)
     pub date: String,
-    /// Exercise type: treadmill (tm)
+    /// Exercise type: treadmill (tm), bowflex (bf)
     #[serde(default = "default_exercise_type")]
     pub exercise_type: String,
     /// Timestamp (defaults to current time)
@@ -1003,13 +1003,13 @@ pub struct DeleteExerciseParams {
 pub struct AddExerciseSegmentParams {
     /// Exercise session ID
     pub exercise_id: i64,
-    /// Duration in minutes (provide 2 of 3: duration, speed, distance)
+    /// Duration in minutes. Treadmill: provide 2 of 3 (duration, speed, distance). Bowflex: required.
     pub duration_minutes: Option<f64>,
-    /// Speed in mph (provide 2 of 3: duration, speed, distance)
+    /// Treadmill: speed in mph (2 of 3). Bowflex: setting level 1-20 (required).
     pub speed_mph: Option<f64>,
-    /// Distance in miles (provide 2 of 3: duration, speed, distance)
+    /// Distance in miles. Treadmill: 2 of 3. Bowflex: not used (auto 0).
     pub distance_miles: Option<f64>,
-    /// Incline percentage (default 0)
+    /// Incline percentage (default 0, treadmill only)
     pub incline_percent: Option<f64>,
     /// Average heart rate during segment
     pub avg_heart_rate: Option<f64>,
@@ -1782,7 +1782,7 @@ impl UhmService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Add a segment to an exercise session. Provide 2 of 3: duration_minutes, speed_mph, distance_miles. System calculates the third and calories burned using current weight.")]
+    #[tool(description = "Add a segment to an exercise session. Treadmill: provide 2 of 3 (duration_minutes, speed_mph, distance_miles). Bowflex: provide duration_minutes + speed_mph (setting 1-20). Calories calculated automatically using current weight.")]
     fn add_exercise_segment(&self, Parameters(p): Parameters<AddExerciseSegmentParams>) -> Result<CallToolResult, McpError> {
         let result = exercise::add_exercise_segment(
             &self.database,

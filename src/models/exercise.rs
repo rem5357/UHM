@@ -13,18 +13,21 @@ use crate::db::DbResult;
 #[serde(rename_all = "snake_case")]
 pub enum ExerciseType {
     Treadmill,
+    Bowflex,
 }
 
 impl ExerciseType {
     pub fn as_str(&self) -> &'static str {
         match self {
             ExerciseType::Treadmill => "treadmill",
+            ExerciseType::Bowflex => "bowflex",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "treadmill" | "tm" => Some(ExerciseType::Treadmill),
+            "bowflex" | "bf" => Some(ExerciseType::Bowflex),
             _ => None,
         }
     }
@@ -32,6 +35,15 @@ impl ExerciseType {
     pub fn display_name(&self) -> &'static str {
         match self {
             ExerciseType::Treadmill => "Treadmill",
+            ExerciseType::Bowflex => "Bowflex Max Trainer",
+        }
+    }
+
+    /// WW activity points multiplier for this exercise type
+    pub fn ww_multiplier(&self) -> f64 {
+        match self {
+            ExerciseType::Treadmill => 1.0,
+            ExerciseType::Bowflex => 1.5,
         }
     }
 }
@@ -281,6 +293,10 @@ impl Exercise {
     pub fn recalculate_totals(conn: &Connection, id: i64) -> DbResult<Self> {
         let segments = ExerciseSegment::list_for_exercise(conn, id)?;
 
+        // Look up exercise type for WW multiplier
+        let exercise = Self::get_by_id(conn, id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
         let total_duration: f64 = segments.iter()
             .filter_map(|s| s.duration_minutes)
             .sum();
@@ -291,9 +307,10 @@ impl Exercise {
             .map(|s| s.calories_burned)
             .sum();
 
-        // WW Activity Points: weight_lbs × duration_min × 0.00047 (uncapped — linear with effort)
+        // WW Activity Points: weight_lbs × duration_min × 0.00047 × type_multiplier
+        // Treadmill: 1.0x, Bowflex: 1.5x (full-body resistance exercise)
         let weight_lbs = get_latest_weight(conn)?.unwrap_or(150.0);
-        let ww_activity = (weight_lbs * total_duration * 0.00047).max(0.0);
+        let ww_activity = (weight_lbs * total_duration * 0.00047 * exercise.exercise_type.ww_multiplier()).max(0.0);
 
         conn.execute(
             r#"
@@ -401,22 +418,31 @@ impl ExerciseSegment {
             |row| row.get(0),
         )?;
 
-        // Calculate the third value if two are provided
-        let (duration, speed, distance, calculated_field, is_consistent) =
-            calculate_missing_value(data.duration_minutes, data.speed_mph, data.distance_miles);
+        // Look up parent exercise type for type-aware calculations
+        let exercise = Exercise::get_by_id(conn, data.exercise_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
 
         // Get current weight for calorie calculation
         let weight_lbs = get_latest_weight(conn)?;
 
-        // Calculate calories burned
-        let calories = calculate_calories_burned(
-            duration,
-            speed,
-            data.incline_percent.unwrap_or(0.0),
-            weight_lbs,
-        );
-
-        let incline = data.incline_percent.unwrap_or(0.0);
+        // Calculate values based on exercise type
+        let (duration, speed, distance, calculated_field, is_consistent, calories, incline) =
+            match exercise.exercise_type {
+                ExerciseType::Bowflex => {
+                    // Bowflex: duration + setting required, distance always 0
+                    let dur = data.duration_minutes;
+                    let setting = data.speed_mph; // repurposed as setting (1-20)
+                    let cal = calculate_bowflex_calories(dur, setting, weight_lbs);
+                    (dur, setting, Some(0.0), CalculatedField::None, true, cal, 0.0)
+                }
+                ExerciseType::Treadmill => {
+                    let (d, s, dist, cf, ic) =
+                        calculate_missing_value(data.duration_minutes, data.speed_mph, data.distance_miles);
+                    let inc = data.incline_percent.unwrap_or(0.0);
+                    let cal = calculate_treadmill_calories(d, s, inc, weight_lbs);
+                    (d, s, dist, cf, ic, cal, inc)
+                }
+            };
 
         conn.execute(
             r#"
@@ -484,25 +510,32 @@ impl ExerciseSegment {
             None => return Ok(None),
         };
 
+        // Look up parent exercise type
+        let exercise = Exercise::get_by_id(conn, current.exercise_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
         let new_duration = data.duration_minutes.or(current.duration_minutes);
         let new_speed = data.speed_mph.or(current.speed_mph);
         let new_distance = data.distance_miles.or(current.distance_miles);
         let new_incline = data.incline_percent.unwrap_or(current.incline_percent);
 
-        // Recalculate values
-        let (duration, speed, distance, calculated_field, is_consistent) =
-            calculate_missing_value(new_duration, new_speed, new_distance);
-
         // Get current weight for calorie calculation
         let weight_lbs = get_latest_weight(conn)?;
 
-        // Calculate calories burned
-        let calories = calculate_calories_burned(
-            duration,
-            speed,
-            new_incline,
-            weight_lbs,
-        );
+        // Calculate values based on exercise type
+        let (duration, speed, distance, calculated_field, is_consistent, calories) =
+            match exercise.exercise_type {
+                ExerciseType::Bowflex => {
+                    let cal = calculate_bowflex_calories(new_duration, new_speed, weight_lbs);
+                    (new_duration, new_speed, Some(0.0), CalculatedField::None, true, cal)
+                }
+                ExerciseType::Treadmill => {
+                    let (d, s, dist, cf, ic) =
+                        calculate_missing_value(new_duration, new_speed, new_distance);
+                    let cal = calculate_treadmill_calories(d, s, new_incline, weight_lbs);
+                    (d, s, dist, cf, ic, cal)
+                }
+            };
 
         conn.execute(
             r#"
@@ -564,11 +597,16 @@ impl ExerciseSegment {
             None => return Ok(None),
         };
 
+        // Look up parent exercise type
+        let exercise = Exercise::get_by_id(conn, current.exercise_id)?
+            .ok_or_else(|| crate::db::DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+
         // Get current weight for calorie calculation
         let weight_lbs = get_latest_weight(conn)?;
 
-        // Recalculate calories with current formula
-        let calories = calculate_calories_burned(
+        // Recalculate calories with current formula (type-aware)
+        let calories = calculate_segment_calories(
+            exercise.exercise_type,
             current.duration_minutes,
             current.speed_mph,
             current.incline_percent,
@@ -656,10 +694,60 @@ fn get_latest_weight(conn: &Connection) -> DbResult<Option<f64>> {
     }
 }
 
+/// Calculate calories burned for a segment based on exercise type
+fn calculate_segment_calories(
+    exercise_type: ExerciseType,
+    duration_minutes: Option<f64>,
+    speed_mph: Option<f64>,
+    incline_percent: f64,
+    weight_lbs: Option<f64>,
+) -> f64 {
+    match exercise_type {
+        ExerciseType::Treadmill => calculate_treadmill_calories(duration_minutes, speed_mph, incline_percent, weight_lbs),
+        ExerciseType::Bowflex => calculate_bowflex_calories(duration_minutes, speed_mph, weight_lbs),
+    }
+}
+
+/// Calculate calories burned for Bowflex Max Trainer
+/// Uses MET formula: Cal/min = MET × 3.5 × weight_kg / 200
+/// speed_mph is repurposed as setting (1-20) for MET lookup
+fn calculate_bowflex_calories(
+    duration_minutes: Option<f64>,
+    setting: Option<f64>,
+    weight_lbs: Option<f64>,
+) -> f64 {
+    let duration = duration_minutes.unwrap_or(0.0);
+    let setting_val = setting.unwrap_or(5.0);
+    let weight_lbs = weight_lbs.unwrap_or(150.0);
+
+    if duration <= 0.0 {
+        return 0.0;
+    }
+
+    let weight_kg = weight_lbs / 2.205;
+
+    // Setting-to-MET lookup (hybrid stair-stepper/elliptical)
+    let met = if setting_val <= 4.0 {
+        5.0  // Light — elliptical moderate effort
+    } else if setting_val <= 8.0 {
+        6.5  // Moderate — stair-stepper moderate/vigorous
+    } else if setting_val <= 12.0 {
+        8.0  // Hard — elliptical vigorous effort
+    } else {
+        10.0 // Max — stair-climbing fast
+    };
+
+    // Cal/min = MET × 3.5 × weight_kg / 200
+    let cal_per_min = met * 3.5 * weight_kg / 200.0;
+    let calories = cal_per_min * duration;
+
+    (calories * 10.0).round() / 10.0
+}
+
 /// Calculate calories burned for treadmill exercise
 /// Uses MET (Metabolic Equivalent of Task) formula:
 /// Calories = MET × weight_kg × duration_hours
-fn calculate_calories_burned(
+fn calculate_treadmill_calories(
     duration_minutes: Option<f64>,
     speed_mph: Option<f64>,
     incline_percent: f64,

@@ -141,7 +141,7 @@ pub fn add_exercise(
     notes: Option<&str>,
 ) -> Result<AddExerciseResponse, String> {
     let et = ExerciseType::from_str(exercise_type)
-        .ok_or_else(|| format!("Invalid exercise type: '{}'. Valid types: treadmill (tm)", exercise_type))?;
+        .ok_or_else(|| format!("Invalid exercise type: '{}'. Valid types: treadmill (tm), bowflex (bf)", exercise_type))?;
 
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
@@ -408,19 +408,32 @@ pub fn add_exercise_segment(
 ) -> Result<AddSegmentResponse, String> {
     let conn = db.get_conn().map_err(|e| format!("Database error: {}", e))?;
 
-    // Verify exercise exists
-    let _exercise = Exercise::get_by_id(&conn, exercise_id)
+    // Verify exercise exists and get type
+    let exercise = Exercise::get_by_id(&conn, exercise_id)
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or_else(|| format!("Exercise not found with id: {}", exercise_id))?;
 
-    // Need at least 2 of 3 values
-    let provided_count = [duration_minutes.is_some(), speed_mph.is_some(), distance_miles.is_some()]
-        .iter()
-        .filter(|&&x| x)
-        .count();
-
-    if provided_count < 2 {
-        return Err("Must provide at least 2 of: duration_minutes, speed_mph, distance_miles".to_string());
+    // Validate based on exercise type
+    match exercise.exercise_type {
+        ExerciseType::Bowflex => {
+            // Bowflex: need duration_minutes + speed_mph (setting 1-20)
+            if duration_minutes.is_none() {
+                return Err("Bowflex segments require duration_minutes".to_string());
+            }
+            if speed_mph.is_none() {
+                return Err("Bowflex segments require speed_mph (setting 1-20)".to_string());
+            }
+        }
+        ExerciseType::Treadmill => {
+            // Treadmill: need at least 2 of 3 values
+            let provided_count = [duration_minutes.is_some(), speed_mph.is_some(), distance_miles.is_some()]
+                .iter()
+                .filter(|&&x| x)
+                .count();
+            if provided_count < 2 {
+                return Err("Treadmill segments require at least 2 of: duration_minutes, speed_mph, distance_miles".to_string());
+            }
+        }
     }
 
     let data = ExerciseSegmentCreate {
