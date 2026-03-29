@@ -1241,6 +1241,9 @@ fn migrate_v16(conn: &Connection) -> DbResult<()> {
     // SQLite cannot ALTER CHECK constraints, so recreate the exercises table
     conn.execute_batch(
         r#"
+        -- Clean up any partial previous attempt
+        DROP TABLE IF EXISTS exercises_new;
+
         -- Create new table with updated CHECK constraint
         CREATE TABLE exercises_new (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1258,9 +1261,20 @@ fn migrate_v16(conn: &Connection) -> DbResult<()> {
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        -- Copy all existing data
+        -- Copy all existing data with safe defaults
         INSERT INTO exercises_new
-            SELECT * FROM exercises;
+            (id, day_id, exercise_type, timestamp,
+             cached_duration_minutes, cached_distance_miles, cached_calories_burned,
+             ww_activity_points, pre_vital_group_id, post_vital_group_id,
+             notes, created_at, updated_at)
+            SELECT id, day_id, exercise_type, timestamp,
+                   COALESCE(cached_duration_minutes, 0),
+                   COALESCE(cached_distance_miles, 0),
+                   COALESCE(cached_calories_burned, 0),
+                   COALESCE(ww_activity_points, 0),
+                   pre_vital_group_id, post_vital_group_id,
+                   notes, created_at, updated_at
+            FROM exercises;
 
         -- Drop old table and rename
         DROP TABLE exercises;
