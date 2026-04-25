@@ -7,7 +7,7 @@ use rusqlite::{Connection, params};
 use super::connection::DbResult;
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 16;
+const SCHEMA_VERSION: i32 = 17;
 
 /// Run all migrations to bring the database up to the current schema version
 pub fn run_migrations(conn: &Connection) -> DbResult<()> {
@@ -108,6 +108,11 @@ pub fn run_migrations(conn: &Connection) -> DbResult<()> {
     if current_version < 16 {
         migrate_v16(conn)?;
         conn.execute("INSERT INTO schema_migrations (version) VALUES (16)", [])?;
+    }
+
+    if current_version < 17 {
+        migrate_v17(conn)?;
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (17)", [])?;
     }
 
     Ok(())
@@ -1288,6 +1293,36 @@ fn migrate_v16(conn: &Connection) -> DbResult<()> {
     )?;
 
     eprintln!("[migrate_v16] Added bowflex exercise type to CHECK constraint");
+
+    Ok(())
+}
+
+/// Migration v17: Recalculate treadmill segment calories using linearly
+/// interpolated MET values. Bracket-snapping made calories non-monotonic
+/// inside a speed bracket (e.g., 2 mi @ 3.2 mph burned fewer calories than
+/// 2 mi @ 3.0 mph). Cascade-recompute every segment so historical sessions
+/// reflect the corrected formula, then refresh exercise + day totals.
+fn migrate_v17(conn: &Connection) -> DbResult<()> {
+    let exercise_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT id FROM exercises")?;
+        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut segments_updated = 0usize;
+    for exercise_id in &exercise_ids {
+        let updated = crate::models::ExerciseSegment::recalculate_all_calories_for_exercise(
+            conn,
+            *exercise_id,
+        )?;
+        segments_updated += updated.len();
+    }
+
+    eprintln!(
+        "[migrate_v17] MET interpolation: recalculated {} segments across {} exercises",
+        segments_updated,
+        exercise_ids.len()
+    );
 
     Ok(())
 }

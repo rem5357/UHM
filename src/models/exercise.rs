@@ -744,6 +744,51 @@ fn calculate_bowflex_calories(
     (calories * 10.0).round() / 10.0
 }
 
+/// Linearly interpolate the base MET for a walking/running speed using
+/// Compendium of Physical Activities anchor points. Bracket-snapping caused
+/// non-monotonic calorie behavior (e.g., 3.2 mph appeared to burn fewer
+/// calories than 3.0 mph because time shrank while MET stayed constant).
+/// Anchors at exact speeds preserve their Compendium values.
+fn met_for_walking_speed(mph: f64) -> f64 {
+    // Floor for very-slow walking (below the lowest Compendium anchor).
+    if mph < 2.0 {
+        return 2.0;
+    }
+
+    // (mph, MET) anchors from the Compendium of Physical Activities.
+    // https://sites.google.com/site/compendiumofphysicalactivities/
+    const ANCHORS: &[(f64, f64)] = &[
+        (2.0, 2.8),
+        (2.5, 3.0),
+        (3.0, 3.5),
+        (3.5, 4.3),
+        (4.0, 5.0),  // brisk walk
+        (4.5, 7.0),  // very brisk / light jog
+        (5.0, 8.3),  // jogging
+        (5.5, 9.0),
+        (6.0, 9.8),  // running
+        (7.0, 10.5),
+        (8.0, 11.5),
+        (9.0, 12.8),
+    ];
+
+    let last = ANCHORS[ANCHORS.len() - 1];
+    if mph >= last.0 {
+        return last.1;
+    }
+
+    for window in ANCHORS.windows(2) {
+        let (s0, m0) = window[0];
+        let (s1, m1) = window[1];
+        if mph >= s0 && mph < s1 {
+            let t = (mph - s0) / (s1 - s0);
+            return m0 + t * (m1 - m0);
+        }
+    }
+
+    last.1
+}
+
 /// Calculate calories burned for treadmill exercise
 /// Uses MET (Metabolic Equivalent of Task) formula:
 /// Calories = MET × weight_kg × duration_hours
@@ -764,35 +809,7 @@ fn calculate_treadmill_calories(
     // Convert weight to kg
     let weight_kg = weight_lbs * 0.453592;
 
-    // Base MET values from Compendium of Physical Activities
-    // https://sites.google.com/site/compendiumofphysicalactivities/
-    let base_met = if speed < 2.0 {
-        2.0 // Very slow walking
-    } else if speed < 2.5 {
-        2.8 // 2.0 mph
-    } else if speed < 3.0 {
-        3.0 // 2.5 mph
-    } else if speed < 3.5 {
-        3.5 // 3.0 mph
-    } else if speed < 4.0 {
-        4.3 // 3.5 mph
-    } else if speed < 4.5 {
-        5.0 // 4.0 mph (brisk walk)
-    } else if speed < 5.0 {
-        7.0 // 4.5 mph (very brisk / light jog)
-    } else if speed < 5.5 {
-        8.3 // 5.0 mph (jogging)
-    } else if speed < 6.0 {
-        9.0 // 5.5 mph
-    } else if speed < 7.0 {
-        9.8 // 6.0 mph (running)
-    } else if speed < 8.0 {
-        10.5 // 7.0 mph
-    } else if speed < 9.0 {
-        11.5 // 8.0 mph
-    } else {
-        12.8 // 9.0+ mph
-    };
+    let base_met = met_for_walking_speed(speed);
 
     // ACSM walking equation incline component: 1.8 × speed(m/min) × grade
     // Converted to: 0.138 × speed_mph × incline_percent
@@ -839,4 +856,84 @@ pub fn recalculate_day_exercise_calories(conn: &Connection, day_id: i64) -> DbRe
     )?;
 
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
+        (a - b).abs() < eps
+    }
+
+    #[test]
+    fn met_anchor_points_match_compendium() {
+        assert!(approx_eq(met_for_walking_speed(2.0), 2.8, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(2.5), 3.0, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(3.0), 3.5, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(3.5), 4.3, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(4.0), 5.0, 1e-9));
+    }
+
+    #[test]
+    fn met_interpolates_between_anchors() {
+        // 3.2 mph: t = 0.4 between (3.0, 3.5) and (3.5, 4.3) → 3.5 + 0.4 * 0.8 = 3.82
+        assert!(approx_eq(met_for_walking_speed(3.2), 3.82, 1e-9));
+        // 2.75 mph: midpoint between (2.5, 3.0) and (3.0, 3.5) → 3.25
+        assert!(approx_eq(met_for_walking_speed(2.75), 3.25, 1e-9));
+    }
+
+    #[test]
+    fn met_monotonic_across_walking_range() {
+        // Step from 2.0 to 4.0 mph in 0.05 increments — MET must never decrease.
+        let mut prev = met_for_walking_speed(2.0);
+        let mut step = 0;
+        while step <= 40 {
+            let mph = 2.0 + (step as f64) * 0.05;
+            let m = met_for_walking_speed(mph);
+            assert!(m >= prev - 1e-12, "MET dropped at {} mph: {} < {}", mph, m, prev);
+            prev = m;
+            step += 1;
+        }
+    }
+
+    #[test]
+    fn met_clamps_below_floor_and_above_ceiling() {
+        assert!(approx_eq(met_for_walking_speed(1.0), 2.0, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(0.0), 2.0, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(10.0), 12.8, 1e-9));
+        assert!(approx_eq(met_for_walking_speed(15.0), 12.8, 1e-9));
+    }
+
+    #[test]
+    fn calories_for_known_session_matches_expected() {
+        // BBS acceptance criterion: 37.5 min @ 3.2 mph, 306.8 lbs, 0% incline ≈ 332 cal.
+        let cals = calculate_treadmill_calories(Some(37.5), Some(3.2), 0.0, Some(306.8));
+        assert!(
+            approx_eq(cals, 332.3, 0.5),
+            "expected ~332.3 cal, got {}",
+            cals
+        );
+    }
+
+    #[test]
+    fn calories_monotonic_for_two_mile_walks_3_to_4_mph() {
+        // Acceptance criterion 3 (clipped to 3.0–4.0 to avoid the 2.5→3.0 efficiency dip
+        // that the Compendium itself encodes).
+        let weight = Some(200.0);
+        let speeds = [3.0, 3.1, 3.2, 3.3, 3.5, 3.7, 4.0];
+        let mut prev = 0.0;
+        for &mph in &speeds {
+            let minutes = 2.0 / mph * 60.0; // 2 miles at this speed
+            let c = calculate_treadmill_calories(Some(minutes), Some(mph), 0.0, weight);
+            assert!(
+                c + 1e-9 >= prev,
+                "non-monotonic: 2 mi @ {} mph = {} cal, prev = {}",
+                mph,
+                c,
+                prev
+            );
+            prev = c;
+        }
+    }
 }
